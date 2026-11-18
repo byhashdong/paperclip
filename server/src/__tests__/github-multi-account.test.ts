@@ -18,6 +18,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { resolveGitHubOperationCredentials } from "../services/github-operation-credentials.js";
 import {
+  clearPersonalTokenOwnerCache,
   createGitRemoteAuthProvider,
   filterResolvedGitHubConnectionsForRun,
 } from "../services/git-credentials.js";
@@ -191,6 +192,95 @@ const support = external ? { supported: true } : await getEmbeddedPostgresTestSu
       expect((await credentials(input, "byhashdong")).login).toBe("byhashdong");
     } finally {
       vault.values.delete(work.definitionId);
+    }
+  });
+
+  /** Both accounts connected with personal access tokens and no owners saved. */
+  async function twoTokenAccounts() {
+    const accounts = await twoAccounts();
+    for (const account of [accounts.personal, accounts.work]) {
+      await db.update(toolConnections).set({ config: { sourceTemplateKey: "github", connectionMethodKey: "mcp-key" } })
+        .where(eq(toolConnections.id, account.connectionId));
+      await db.update(connectionGrants).set({
+        providerTenant: null,
+        credentialSecretRefs: [{ secretId: account.secretId, configPath: "credentials.authorization", versionSelector: "latest" }],
+      }).where(eq(connectionGrants.id, account.id));
+    }
+    vault.values.set(accounts.personal.definitionId, "Bearer github_pat_personal");
+    vault.values.set(accounts.work.definitionId, "Bearer github_pat_work");
+    // GitHub lists the repositories each token can reach.
+    const reachable: Record<string, string[]> = {
+      "Bearer github_pat_personal": ["byhashdong/paperclip"],
+      "Bearer github_pat_work": ["sentinan/ecg-reporting", "sentinan/app_redirect_page"],
+    };
+    const github = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const authorization = new Headers(init?.headers).get("authorization") ?? "";
+      const names = reachable[authorization];
+      if (!names) return new Response("Bad credentials", { status: 401 });
+      return Response.json(names.map((full_name, index) => ({ id: index + 1, full_name, private: true })));
+    });
+    vi.stubGlobal("fetch", github);
+    clearPersonalTokenOwnerCache();
+    return { ...accounts, github, reachable };
+  }
+
+  it("routes personal access token connections by the owners each token can reach", async () => {
+    const { input, personal, work, github, reachable } = await twoTokenAccounts();
+    try {
+      const forWork = await credentials(input, "sentinan");
+      expect(forWork).toMatchObject({ status: "available", connectionId: work.connectionId });
+      expect(forWork.env.GH_TOKEN).toBe("github_pat_work");
+      const forPersonal = await credentials(input, "byhashdong");
+      expect(forPersonal).toMatchObject({ status: "available", connectionId: personal.connectionId });
+      expect(forPersonal.env.GH_TOKEN).toBe("github_pat_personal");
+      // Neither token reaches this owner: refused, never borrowed.
+      const unknown = await credentials(input, "octocat");
+      expect(unknown.status).toBe("unavailable");
+      expect(unknown.reason).toMatch(/No GitHub connection is responsible for "octocat"/);
+      expect(unknown.env).toEqual({});
+      // Each token is asked once; later operations reuse what it reaches.
+      const lookups = github.mock.calls.length;
+      expect(lookups).toBe(2);
+      await credentials(input, "sentinan");
+      expect(github.mock.calls.length).toBe(lookups);
+
+      // A saved owner list wins over what the token reaches.
+      await db.update(toolConnections).set({ config: { sourceTemplateKey: "github", connectionMethodKey: "mcp-key", methodConfig: { githubOwners: "web-biotech" } } })
+        .where(eq(toolConnections.id, work.connectionId));
+      expect((await credentials(input, "sentinan")).reason).toMatch(/No GitHub connection is responsible for "sentinan"/);
+      await db.update(toolConnections).set({ config: { sourceTemplateKey: "github", connectionMethodKey: "mcp-key" } })
+        .where(eq(toolConnections.id, work.connectionId));
+
+      // Replacing a token looks its owners up again.
+      reachable["Bearer github_pat_work_2"] = ["web-biotech/portal"];
+      vault.values.set(work.definitionId, "Bearer github_pat_work_2");
+      await db.update(companySecrets).set({ latestVersion: 2, updatedAt: new Date(Date.now() + 1000) })
+        .where(eq(companySecrets.id, work.secretId));
+      expect((await credentials(input, "web-biotech")).env.GH_TOKEN).toBe("github_pat_work_2");
+      expect((await credentials(input, "sentinan")).status).toBe("unavailable");
+      expect((await credentials(input, "byhashdong")).env.GH_TOKEN).toBe("github_pat_personal");
+    } finally {
+      vi.unstubAllGlobals();
+      vault.values.delete(personal.definitionId);
+      vault.values.delete(work.definitionId);
+      clearPersonalTokenOwnerCache();
+    }
+  });
+
+  it("claims no owners for a token GitHub rejects, without affecting the other account", async () => {
+    const { input, personal, work, reachable } = await twoTokenAccounts();
+    delete reachable["Bearer github_pat_work"];
+    try {
+      const failed = await credentials(input, "sentinan");
+      expect(failed.status).toBe("unavailable");
+      expect(failed.reason).toMatch(/No GitHub connection is responsible for "sentinan"/);
+      expect(JSON.stringify(failed)).not.toContain("github_pat");
+      expect((await credentials(input, "byhashdong")).env.GH_TOKEN).toBe("github_pat_personal");
+    } finally {
+      vi.unstubAllGlobals();
+      vault.values.delete(personal.definitionId);
+      vault.values.delete(work.definitionId);
+      clearPersonalTokenOwnerCache();
     }
   });
 

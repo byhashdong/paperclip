@@ -14,7 +14,14 @@ import { and, eq, inArray, or, sql } from "drizzle-orm";
 import { isGitHubDotCom } from "./github-fetch.js";
 import { secretService } from "./secrets.js";
 import { toolAccessService } from "./tool-access.js";
-import { githubOwnerFromRemoteUrl, routeGitHubCandidatesByOwner } from "./tool-access/github-owner-routing.js";
+import { loadGitHubTokenRepositories } from "./tool-access/github-access-discovery.js";
+import {
+  configuredGitHubOwners,
+  githubOwnerFromRemoteUrl,
+  grantGitHubOwners,
+  normalizeGitHubOwner,
+  routeGitHubCandidatesByOwner,
+} from "./tool-access/github-owner-routing.js";
 
 /**
  * Server-side git credentials for managed project checkouts and execution-workspace base
@@ -376,6 +383,120 @@ function isGitHubPersonalAccessTokenConnection(connection: { config?: unknown; t
     && (config.connectionMethodKey ?? transport.connectionMethodKey) === "mcp-key";
 }
 
+type GitHubGrant = typeof connectionGrants.$inferSelect;
+type GitHubGrantSecretRef = GitHubGrant["credentialSecretRefs"][number];
+
+/** Resolve the GitHub token a grant stores, through the audited secret service. */
+async function resolveGitHubGrantToken(
+  db: Db,
+  secrets: Pick<GitCredentialSecretsDeps, "resolveSecretValue" | "resolveUserSecretValue">,
+  companyId: string,
+  grant: GitHubGrant,
+  accessRef: GitHubGrantSecretRef,
+  options: {
+    consumerId: string;
+    personalAccessToken: boolean;
+    context: { agentId?: string | null; issueId?: string | null; heartbeatRunId?: string | null; responsibleUserId?: string | null };
+  },
+): Promise<{ token: string } | { error: string }> {
+  const accessContext = {
+    consumerType: "system" as const,
+    consumerId: options.consumerId,
+    actorType: "system" as const,
+    actorId: options.context.agentId ?? undefined,
+    issueId: options.context.issueId ?? null,
+    heartbeatRunId: options.context.heartbeatRunId ?? null,
+    responsibleUserId: options.context.responsibleUserId ?? null,
+  };
+  let token: string;
+  if (grant.kind === "user") {
+    if (!grant.subjectUserId || !secrets.resolveUserSecretValue) {
+      return { error: "The personal GitHub credential cannot be resolved" };
+    }
+    const [secret] = await db.select({
+      userSecretDefinitionId: companySecrets.userSecretDefinitionId,
+    }).from(companySecrets).where(and(
+      eq(companySecrets.companyId, companyId),
+      eq(companySecrets.id, accessRef.secretId),
+      eq(companySecrets.ownerUserId, grant.subjectUserId),
+    )).limit(1);
+    if (!secret?.userSecretDefinitionId) return { error: "The personal GitHub credential is invalid" };
+    const resolved = await secrets.resolveUserSecretValue(companyId, {
+      definitionId: secret.userSecretDefinitionId,
+      responsibleUserId: grant.subjectUserId,
+      version: accessRef.versionSelector ?? "latest",
+      required: true,
+    }, accessContext);
+    if (!resolved) return { error: "The personal GitHub credential is missing" };
+    token = resolved.value;
+  } else {
+    token = await secrets.resolveSecretValue(companyId, accessRef.secretId, accessRef.versionSelector ?? "latest", { accessContext });
+  }
+  if (options.personalAccessToken) token = token.trim().replace(/^(?:bearer|token)\s+/i, "").trim();
+  if (!token) return { error: "The personal GitHub credential is missing" };
+  return { token };
+}
+
+const PERSONAL_TOKEN_OWNERS_TTL_MS = 10 * 60_000;
+const PERSONAL_TOKEN_OWNERS_RETRY_MS = 60_000;
+const personalTokenOwnerCache = new Map<string, { owners: string[]; expiresAt: number }>();
+
+/** For tests: forget detected personal access token owners. */
+export function clearPersonalTokenOwnerCache() {
+  personalTokenOwnerCache.clear();
+}
+
+/**
+ * Owners (users and organizations) whose repositories a personal access token
+ * can reach. A token connection has no access snapshot, so without this an
+ * empty "Responsible GitHub owners" setting would leave it handling nothing
+ * once a second GitHub account is connected. Results are cached per token
+ * version; a failed lookup is retried after a minute and claims no owners.
+ */
+async function detectPersonalTokenOwners(
+  db: Db,
+  companyId: string,
+  grant: GitHubGrant,
+  context: { agentId?: string | null; responsibleUserId?: string | null },
+  request: typeof fetch,
+): Promise<string[]> {
+  const accessRef = grant.credentialSecretRefs.find((ref) => ref.configPath === "credentials.authorization");
+  if (!accessRef) return [];
+  const [secret] = await db.select({ updatedAt: companySecrets.updatedAt, latestVersion: companySecrets.latestVersion })
+    .from(companySecrets)
+    .where(and(eq(companySecrets.companyId, companyId), eq(companySecrets.id, accessRef.secretId)))
+    .limit(1);
+  if (!secret) return [];
+  const key = `${grant.id}:${accessRef.secretId}:${secret.latestVersion}:${new Date(secret.updatedAt).getTime()}`;
+  const now = Date.now();
+  const cached = personalTokenOwnerCache.get(key);
+  if (cached && cached.expiresAt > now) return cached.owners;
+  let owners: string[] = [];
+  let ttl = PERSONAL_TOKEN_OWNERS_RETRY_MS;
+  try {
+    const resolved = await resolveGitHubGrantToken(db, secretService(db), companyId, grant, accessRef, {
+      consumerId: "github-owner-routing",
+      personalAccessToken: true,
+      context,
+    });
+    if ("token" in resolved) {
+      const repositories = await loadGitHubTokenRepositories({ Authorization: `Bearer ${resolved.token}` }, request);
+      owners = [...new Set(repositories
+        .map((repository) => normalizeGitHubOwner(repository.fullName.split("/")[0]))
+        .filter((owner): owner is string => Boolean(owner)))].sort();
+      ttl = PERSONAL_TOKEN_OWNERS_TTL_MS;
+    }
+  } catch {
+    // Provider and credential errors can carry secrets; an unreachable token
+    // simply claims no owners until the next attempt.
+  }
+  for (const [entryKey, entry] of personalTokenOwnerCache) {
+    if (entry.expiresAt <= now || entryKey.startsWith(`${grant.id}:`)) personalTokenOwnerCache.delete(entryKey);
+  }
+  personalTokenOwnerCache.set(key, { owners, expiresAt: now + ttl });
+  return owners;
+}
+
 export async function resolveManagedGitHubIdentitySelection(
   db: Db,
   companyId: string,
@@ -391,6 +512,8 @@ export async function resolveManagedGitHubIdentitySelection(
     ownerRoutingMode?: "operation" | "catalog";
     /** The connection whose own tools or data an ownerless operation uses. */
     routedConnectionId?: string | null;
+    /** Tests only: the GitHub API client used to detect token owners. */
+    githubFetch?: typeof fetch;
   },
 ): Promise<{
   configured: boolean;
@@ -399,6 +522,8 @@ export async function resolveManagedGitHubIdentitySelection(
   error?: string;
   /** The named owner is not handled by any connected GitHub account. */
   ownerUnmatched?: boolean;
+  /** Routing between GitHub accounts refused the operation; `error` is safe to show agents. */
+  routingRefused?: boolean;
 }> {
   const connections = await db.select().from(toolConnections).where(and(
     eq(toolConnections.companyId, companyId),
@@ -462,6 +587,18 @@ export async function resolveManagedGitHubIdentitySelection(
   // Several GitHub accounts can be connected at once. Send each operation to
   // the connection responsible for the repository owner, and fail clearly
   // rather than borrowing another account's credential.
+  // A personal access token has no access snapshot. When the operation names
+  // an owner and its connection lists none, use the owners the token reaches.
+  const detectedOwners = new Map<string, string[]>();
+  if (!context.explicitGrantId && normalizeGitHubOwner(context.repositoryOwner) && tierCandidates.length > 1) {
+    const connectionById = new Map(githubConnections.map((connection) => [connection.id, connection]));
+    await Promise.all(tierCandidates.map(async (grant) => {
+      const connection = connectionById.get(grant.connectionId);
+      if (!connection || !isGitHubPersonalAccessTokenConnection(connection)) return;
+      if (configuredGitHubOwners(connection) !== null || grantGitHubOwners(grant).length > 0) return;
+      detectedOwners.set(grant.id, await detectPersonalTokenOwners(db, companyId, grant, context, context.githubFetch ?? fetch));
+    }));
+  }
   const routing = context.explicitGrantId
     ? { candidates: tierCandidates }
     : routeGitHubCandidatesByOwner({
@@ -470,9 +607,13 @@ export async function resolveManagedGitHubIdentitySelection(
         owner: context.repositoryOwner ?? null,
         mode: context.ownerRoutingMode,
         connectionId: context.routedConnectionId ?? null,
+        detectedOwners,
       });
   if (routing.error) {
-    return { configured: true, identitySource, error: routing.error, ...(routing.ownerUnmatched ? { ownerUnmatched: true } : {}) };
+    return {
+      configured: true, identitySource, error: routing.error, routingRefused: true,
+      ...(routing.ownerUnmatched ? { ownerUnmatched: true } : {}),
+    };
   }
   const candidates = routing.candidates;
   // Reconnecting can create another connection/grant for the same GitHub
@@ -643,41 +784,13 @@ export async function resolveManagedGitHubCredential(
     if (github && !personalAccessToken && (github.installationCount < 1 || github.repositoryCount < 1)) {
       return { configured: true, identitySource: selection.identitySource, error: "The managed GitHub identity no longer has repository access" };
     }
-    const accessContext = {
-      consumerType: "system" as const,
+    const resolvedToken = await resolveGitHubGrantToken(db, secrets, companyId, grant, accessRef, {
       consumerId: "workspace-git-credential",
-      actorType: "system" as const,
-      actorId: context.agentId ?? undefined,
-      issueId: context.issueId ?? null,
-      heartbeatRunId: context.heartbeatRunId ?? null,
-      responsibleUserId: context.responsibleUserId ?? null,
-    };
-    let token: string;
-    if (grant.kind === "user") {
-      if (!grant.subjectUserId || !secrets.resolveUserSecretValue) {
-        return { configured: true, identitySource: selection.identitySource, error: "The personal GitHub credential cannot be resolved" };
-      }
-      const [secret] = await db.select({
-        userSecretDefinitionId: companySecrets.userSecretDefinitionId,
-      }).from(companySecrets).where(and(
-        eq(companySecrets.companyId, companyId),
-        eq(companySecrets.id, accessRef.secretId),
-        eq(companySecrets.ownerUserId, grant.subjectUserId),
-      )).limit(1);
-      if (!secret?.userSecretDefinitionId) return { configured: true, identitySource: selection.identitySource, error: "The personal GitHub credential is invalid" };
-      const resolved = await secrets.resolveUserSecretValue(companyId, {
-        definitionId: secret.userSecretDefinitionId,
-        responsibleUserId: grant.subjectUserId,
-        version: accessRef.versionSelector ?? "latest",
-        required: true,
-      }, accessContext);
-      if (!resolved) return { configured: true, identitySource: selection.identitySource, error: "The personal GitHub credential is missing" };
-      token = resolved.value;
-    } else {
-      token = await secrets.resolveSecretValue(companyId, accessRef.secretId, accessRef.versionSelector ?? "latest", { accessContext });
-    }
-    if (personalAccessToken) token = token.trim().replace(/^(?:bearer|token)\s+/i, "").trim();
-    if (!token) return { configured: true, identitySource: selection.identitySource, error: "The personal GitHub credential is missing" };
+      personalAccessToken,
+      context,
+    });
+    if ("error" in resolvedToken) return { configured: true, identitySource: selection.identitySource, error: resolvedToken.error };
+    const token = resolvedToken.token;
     return {
       configured: true, identitySource: selection.identitySource,
       credential: {

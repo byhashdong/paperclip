@@ -4,7 +4,7 @@ import { setFlagsFromString } from "node:v8";
 import { runInNewContext } from "node:vm";
 import { describe, expect, it, vi } from "vitest";
 import type { Db } from "@paperclipai/db";
-import { ToolGatewayHttpError, type ToolGatewayDescriptor, type ToolGatewayService } from "../tool-gateway.js";
+import { GITHUB_OWNER_UNROUTED, ToolGatewayHttpError, type ToolGatewayDescriptor, type ToolGatewayService } from "../tool-gateway.js";
 import {
   ASSIGNED_CATALOG_CACHE_BYTES, ASSIGNED_CATALOG_CACHE_ENTRIES, assignedCatalogCacheStats,
   ASSIGNED_SCHEMA_ADMISSION_CACHE_ENTRIES, ASSIGNED_SCHEMA_LISTING_BUDGET_BYTES, assignedSchemaAdmissionCacheSize,
@@ -214,6 +214,24 @@ describe("assigned MCP runner tools", () => {
     f.executeTool.mockRejectedValueOnce(revoked);
     await expect(assigned.execute(call)).rejects.toBe(revoked);
     await expect(assigned.execute({ tool: callName, arguments: { name: "newly.granted", arguments: {} } })).rejects.toThrow("assigned_mcp_tool_unknown");
+  });
+
+  it("tells the agent why GitHub owner routing refused a call, without running it", async () => {
+    const read = descriptor("mcp.github:get_file_contents");
+    const f = fixture([read]);
+    const assigned = await createAssignedMcpTools({ ...f, delivery: "on_demand" });
+    const page = await assigned.execute({ tool: searchName, arguments: { query: "" } }) as { tools: Array<{ name: string }> };
+    const call = { tool: callName, arguments: { name: page.tools[0]!.name, arguments: { owner: "octocat", repo: "hello" } } };
+    const reason = 'No GitHub connection is responsible for "octocat". Add octocat to the Responsible GitHub owners setting of the GitHub connection that should handle it.';
+    f.executeTool.mockRejectedValueOnce(new ToolGatewayHttpError(409, reason, GITHUB_OWNER_UNROUTED));
+    const refused = await assigned.execute(call) as { isError?: boolean; content: Array<{ text: string }>; structuredContent: unknown };
+    expect(refused.isError).toBeUndefined();
+    expect(refused.content[0]!.text).toBe(`Paperclip did not run this GitHub call: ${reason}`);
+    expect(refused.structuredContent).toEqual({ paperclipGitHubRouting: { ran: false, reason } });
+    // Every other gateway failure keeps failing; only routing is explained.
+    const unavailable = new ToolGatewayHttpError(409, "GitHub credentials are unavailable", "github_identity_unavailable");
+    f.executeTool.mockRejectedValueOnce(unavailable);
+    await expect(assigned.execute(call)).rejects.toBe(unavailable);
   });
 
   it("deduplicates repeated app tools in direct and on-demand catalogs while retaining revocation", async () => {

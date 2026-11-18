@@ -459,6 +459,13 @@ export interface ToolGatewaySession {
 
 export type ToolGatewayRuntimeSlot = ToolRuntimeSlotView;
 
+/**
+ * Routing between several GitHub accounts refused a call before it reached
+ * GitHub (no connection handles the named owner, or the call names none). The
+ * message carries no credential or repository data and is meant for agents.
+ */
+export const GITHUB_OWNER_UNROUTED = "github_owner_unrouted";
+
 export class ToolGatewayHttpError extends Error {
   constructor(
     public readonly status: number,
@@ -3256,7 +3263,7 @@ export function createToolGatewayService(
           throw new ToolGatewayHttpError(
             409,
             selected.error ?? "No GitHub identity connected",
-            "github_identity_unavailable",
+            selected.routingRefused ? GITHUB_OWNER_UNROUTED : "github_identity_unavailable",
           );
         const original = selected.grant;
         // Acquire before policy evaluation or dispatch. An alternate connection
@@ -4919,7 +4926,7 @@ export function createToolGatewayService(
     ) {
       const captured = githubOperationCredentials.get(session);
       const selected = captured
-        ? { grant: captured.grant, error: undefined }
+        ? { grant: captured.grant, error: undefined, routingRefused: false }
         : await resolveManagedGitHubIdentitySelection(db, session.companyId, {
             agentId: session.agentId,
             responsibleUserId: session.responsibleUserId,
@@ -4934,7 +4941,7 @@ export function createToolGatewayService(
           409,
           selected.error ??
             "GitHub identity changed; retry through the managed tool",
-          "github_identity_unavailable",
+          selected.routingRefused ? GITHUB_OWNER_UNROUTED : "github_identity_unavailable",
         );
       }
       if (selected.grant.kind === "user") {

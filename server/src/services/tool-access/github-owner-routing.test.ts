@@ -135,6 +135,21 @@ describe("routing between GitHub connections", () => {
     }).candidates).toEqual([candidates[1]]);
   });
 
+  it("uses the owners a personal access token reaches when its connection lists none", () => {
+    const candidates = [grant("a", "personal"), grant("b", "work")];
+    const connections = [connection("personal"), connection("work")];
+    const detectedOwners = new Map([["a", ["byhashdong"]], ["b", ["sentinan"]]]);
+    expect(routeGitHubCandidatesByOwner({ candidates, connections, owner: "sentinan", detectedOwners }).candidates).toEqual([candidates[1]]);
+    expect(routeGitHubCandidatesByOwner({ candidates, connections, owner: "byhashdong", detectedOwners }).candidates).toEqual([candidates[0]]);
+    expect(routeGitHubCandidatesByOwner({ candidates, connections, owner: "octocat", detectedOwners }).ownerUnmatched).toBe(true);
+    // Without detection, two token connections handle nothing rather than guessing.
+    expect(routeGitHubCandidatesByOwner({ candidates, connections, owner: "sentinan" }).ownerUnmatched).toBe(true);
+    // A saved list stays authoritative over what the token reaches.
+    expect(routeGitHubCandidatesByOwner({
+      candidates, connections: [connection("personal"), connection("work", "web-biotech")], owner: "sentinan", detectedOwners,
+    }).ownerUnmatched).toBe(true);
+  });
+
   it("keeps a single connected account serving every owner unless it lists owners", () => {
     const only = [grant("a", "personal", { userId: "1", login: "byhashdong" })];
     expect(routeGitHubCandidatesByOwner({ candidates: only, connections: [connection("personal")], owner: "anyone" }).candidates).toEqual(only);

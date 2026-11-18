@@ -6,7 +6,9 @@
  * connection responsible for the repository owner (user or organization) it
  * targets. Owners come from the connection's "Responsible GitHub owners"
  * setting; when that setting is empty they come from the access snapshot of
- * the connection's authorization. `*` marks a connection as the default for
+ * the connection's authorization, or for a personal access token (which has
+ * no snapshot) from the repositories the token can reach. `*` marks a
+ * connection as the default for
  * operations that name no owner, or an owner no other connection claims.
  *
  * Routing never falls back to an arbitrary connection: an owner that no
@@ -188,6 +190,12 @@ export function routeGitHubCandidatesByOwner<G extends GrantLike>(input: {
   mode?: "operation" | "catalog";
   /** For an ownerless operation on one connection's own tools or data. */
   connectionId?: string | null;
+  /**
+   * Owners a credential can reach, by grant id, for authorizations without an
+   * access snapshot (personal access tokens). Used like the snapshot: only
+   * when the connection lists no responsible owners.
+   */
+  detectedOwners?: ReadonlyMap<string, readonly string[]>;
 }): GitHubOwnerRouting<G> {
   const { candidates } = input;
   if (candidates.length === 0) return { candidates };
@@ -207,7 +215,9 @@ export function routeGitHubCandidatesByOwner<G extends GrantLike>(input: {
     if (explicit.length > 0) return { candidates: explicit };
     // A connection with configured owners is responsible for exactly those
     // owners. Only connections without a setting fall back to their snapshot.
-    const derived = candidates.filter((grant) => configured(grant) === null && grantGitHubOwners(grant).includes(owner));
+    const reachable = (grant: G) => grantGitHubOwners(grant).includes(owner)
+      || Boolean(input.detectedOwners?.get(grant.id)?.includes(owner));
+    const derived = candidates.filter((grant) => configured(grant) === null && reachable(grant));
     if (derived.length > 0) return { candidates: derived };
     if (wildcard.length > 0) return { candidates: wildcard };
     if (!multipleAccounts && candidates.every((grant) => configured(grant) === null)) return { candidates };

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { Db } from "@paperclipai/db";
 import { logger } from "../../middleware/logger.js";
 import { admitToolInputSchema, canonicalToolInputSchema, TOOL_INPUT_SCHEMA_MAX_BYTES } from "../../vendor/paperclip-runner/index.js";
-import { deduplicateToolDescriptors, ToolGatewayHttpError, type ToolGatewayDescriptor, type ToolGatewayService } from "../tool-gateway.js";
+import { deduplicateToolDescriptors, GITHUB_OWNER_UNROUTED, ToolGatewayHttpError, type ToolGatewayDescriptor, type ToolGatewayService } from "../tool-gateway.js";
 
 type WorkMode = "standard" | "planning" | "ask" | "skill_test";
 type ToolDefinition = Record<string, unknown>;
@@ -399,12 +399,28 @@ export async function createAssignedMcpTools(input: {
       if (!permits(descriptor) || !permits(descriptor, currentWorkMode)) throw new Error("paperclip_runner_tool_mode_denied");
       // Reauthorize through the existing gateway on every call. Discovery is
       // not a grant: revocation, policy, approval, and audit remain server-owned.
-      const result = await input.gateway.executeTool({
-        gatewayPublicId: input.gatewayPublicId,
-        sessionToken: input.bearerToken,
-        tool: descriptor.name,
-        parameters,
-      });
+      let result: Awaited<ReturnType<typeof input.gateway.executeTool>>;
+      try {
+        result = await input.gateway.executeTool({
+          gatewayPublicId: input.gatewayPublicId,
+          sessionToken: input.bearerToken,
+          tool: descriptor.name,
+          parameters,
+        });
+      } catch (error) {
+        // Failed calls reach the provider only as a fixed diagnostic. Owner
+        // routing between GitHub accounts refuses before GitHub is contacted
+        // and its message is written for agents, so return it as the call's
+        // outcome instead: nothing ran, and the agent learns how to proceed.
+        if (error instanceof ToolGatewayHttpError && error.reasonCode === GITHUB_OWNER_UNROUTED) {
+          const text = `Paperclip did not run this GitHub call: ${error.message}`;
+          return {
+            content: [{ type: "text", text }],
+            structuredContent: { paperclipGitHubRouting: { ran: false, reason: error.message } },
+          };
+        }
+        throw error;
+      }
       if (result.status !== "completed" && result.status !== "replayed") {
         throw new Error("assigned_mcp_tool_execution_incomplete");
       }
