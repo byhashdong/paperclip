@@ -44,6 +44,20 @@
       "requiredResourceFilters": [
         "organization",
         "repository"
+      ],
+      "extensionFields": [
+        {
+          "key": "githubOwners",
+          "label": "Responsible GitHub owners",
+          "type": "text",
+          "required": false,
+          "placeholder": "byhashdong, my-organization",
+          "helperMd": "Only needed when more than one GitHub account is connected. List the GitHub users and organizations whose repositories this connection handles, separated by commas. Paperclip sends each repository operation to the connection that lists its owner and reports an error when no connection does. Add `*` to make this connection the default for operations that name no owner. When empty, Paperclip uses the owners this connection's GitHub access lists.",
+          "validation": {
+            "pattern": "^[A-Za-z0-9*@,;\\s-]*$",
+            "maxLength": 2000
+          }
+        }
       ]
     },
     {
@@ -80,6 +94,26 @@
       "requiredResourceFilters": [
         "organization",
         "repository"
+      ],
+      "extensionFields": [
+        {
+          "key": "githubOwners",
+          "label": "Responsible GitHub owners",
+          "type": "text",
+          "required": false,
+          "placeholder": "byhashdong, my-organization",
+          "helperMd": "Only needed when more than one GitHub account is connected. List the GitHub users and organizations whose repositories this connection handles, separated by commas. Paperclip sends each repository operation to the connection that lists its owner and reports an error when no connection does. Add `*` to make this connection the default for operations that name no owner. When empty, Paperclip uses the owners this connection's GitHub access lists.",
+          "validation": {
+            "pattern": "^[A-Za-z0-9*@,;\\s-]*$",
+            "maxLength": 2000
+          }
+        }
+      ],
+      "consoleLinks": {
+        "keys": "https://github.com/settings/personal-access-tokens/new"
+      },
+      "warnings": [
+        "Shell Git and gh receive this token for repositories this connection handles, and are not constrained by per-tool Ask-first controls."
       ]
     },
     {

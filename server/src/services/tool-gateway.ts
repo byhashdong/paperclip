@@ -52,6 +52,7 @@ import { executeSpekoVoiceTool, spekoToolsForSession } from "./voice/speko-agent
 import { captureRunIdentity } from "./run-identity.js";
 import { emitConnectionInvoked } from "./connector-telemetry.js";
 import { resolveManagedGitHubIdentitySelection } from "./git-credentials.js";
+import { githubOwnerFromToolArguments } from "./tool-access/github-owner-routing.js";
 import { extractRemoteMcpPending } from "./remote-mcp-pending.js";
 import {
   backgroundPollDelayMs,
@@ -1547,6 +1548,7 @@ export function createToolGatewayService(
   const secrets = secretService(db);
   // Authentication produces a new session object for every operation. Keep
   // credential acquisition scoped to that object and out of persisted inputs.
+  const githubRoutingOwners = new WeakMap<ToolGatewaySession, string | null>();
   const githubOperationCredentials = new WeakMap<
     ToolGatewaySession,
     {
@@ -3196,6 +3198,7 @@ export function createToolGatewayService(
   async function findToolForSession(
     session: ToolGatewaySession,
     toolName: string,
+    parameters?: unknown,
   ): Promise<ToolGatewayDescriptor> {
     const connectedTools = (await connectedMcpToolsForCompany(session.companyId)).filter(isModelVisibleTool);
     const hasOnDemandTargets = connectedTools.some(isOnDemandRemoteTool);
@@ -3234,6 +3237,11 @@ export function createToolGatewayService(
         connection?.config.sourceTemplateKey === "github" ||
         connection?.transportConfig?.sourceTemplateKey === "github"
       ) {
+        // One GitHub tool set is listed even when several GitHub accounts are
+        // connected. Each call goes to the connection responsible for the
+        // repository owner it names, then to that connection's equal tool.
+        const repositoryOwner = githubOwnerFromToolArguments(parameters);
+        githubRoutingOwners.set(session, repositoryOwner);
         let selected = await resolveManagedGitHubIdentitySelection(
           db,
           session.companyId,
@@ -3241,6 +3249,7 @@ export function createToolGatewayService(
             agentId: session.agentId,
             responsibleUserId: session.responsibleUserId,
             allowStandingDelegation: false,
+            repositoryOwner,
           },
         );
         if (!selected.grant)
@@ -3301,6 +3310,7 @@ export function createToolGatewayService(
                 responsibleUserId: session.responsibleUserId,
                 allowStandingDelegation: false,
                 excludeGrantId: original.id,
+                repositoryOwner,
               },
             );
             const accountId = original.providerTenant?.github?.userId;
@@ -4914,6 +4924,10 @@ export function createToolGatewayService(
             agentId: session.agentId,
             responsibleUserId: session.responsibleUserId,
             allowStandingDelegation: false,
+            // With several GitHub accounts, keep the owner this operation was
+            // routed by; otherwise this connection answers for its own tools.
+            repositoryOwner: githubRoutingOwners.get(session) ?? null,
+            routedConnectionId: connection.id,
           });
       if (!selected.grant || selected.grant.connectionId !== connection.id) {
         throw new ToolGatewayHttpError(
@@ -10342,7 +10356,7 @@ export function createToolGatewayService(
       session.approvedSlackInvocationId = invocation.id;
       connectionRevision = await toolApprovalConnectionRevision(db, invocation.companyId,
         invocation.connectionId, signedPayload.approvalSnapshot);
-      const tool = await findToolForSession(session, invocation.toolName);
+      const tool = await findToolForSession(session, invocation.toolName, signedPayload.arguments);
       await prepareApprovedConnectionAuthorization(session, tool, signedPayload.approvalSnapshot);
       const liveApprovalSnapshot = await connectedRemoteApprovalSnapshot(
         session,
@@ -12498,7 +12512,7 @@ export function createToolGatewayService(
             signedPayload.identityContextId,
           );
           session.approvedSlackInvocationId = invocation.id;
-          const tool = await findToolForSession(session, invocation.toolName);
+          const tool = await findToolForSession(session, invocation.toolName, signedPayload.arguments);
           const liveApprovalSnapshot = await connectedRemoteApprovalSnapshot(session, tool);
           if (!approvalSnapshotsMatch(signedPayload.approvalSnapshot, liveApprovalSnapshot))
             throw new ToolGatewayHttpError(
@@ -12660,7 +12674,7 @@ export function createToolGatewayService(
               : origin.responsibleUserId;
         }
       }
-      let tool = await findToolForSession(session, input.tool);
+      let tool = await findToolForSession(session, input.tool, input.parameters);
       if (tool.providerType === "paperclip_slack_chat") {
         const definition = SLACK_TOOLS.find(t => t.name === tool.upstreamToolName);
         const args = definition?.schema.parse(input.parameters ?? {}) as Record<string, unknown> | undefined;
@@ -12784,7 +12798,7 @@ export function createToolGatewayService(
       ) {
         const { targetToolName, targetParameters } =
           virtualRunToolInput(requestedParameters);
-        const targetTool = await findToolForSession(session, targetToolName);
+        const targetTool = await findToolForSession(session, targetToolName, targetParameters);
         if (!isOnDemandRemoteTool(targetTool)) {
           throw new ToolGatewayHttpError(
             404,

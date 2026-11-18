@@ -10,7 +10,7 @@ export function githubLauncherSource(options: { brokerFile?: boolean; interprete
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 // A PATH shim can capture this launcher's absolute path and call it again.
 // Reject that cycle before resolving another executable or capturing authority.
 if (process.env.PAPERCLIP_GITHUB_OPERATION_ACTIVE) {
@@ -49,6 +49,80 @@ const connectorRepositoryTools = new Map([['create', 'create_repository'], ['new
 function connectorRepositoryTool(args) {
   if (program !== 'gh' || args[0] !== 'repo' || args.includes('--help') || args.includes('-h')) return null;
   return connectorRepositoryTools.get(args[1]) || null;
+}
+// Several GitHub accounts can be connected. Each operation names the owner of
+// the repository it targets so Paperclip can choose that owner's connection.
+// The hint selects among this run's own accounts and grants no authority.
+const realGit = program === 'git' ? executable : originalPath.map(p => path.join(p, 'git')).find(p => {
+  try { fs.accessSync(p, fs.constants.X_OK); return fs.statSync(p).isFile(); } catch { return false; }
+});
+function githubOwnerOf(value) {
+  if (typeof value !== 'string') return null;
+  const match = /^(?:https?:\/\/)?(?:www\.)?github\.com\/([A-Za-z0-9][A-Za-z0-9-]*)(?:\/|$)/i.exec(value)
+    || /^git@(?:www\.)?github\.com:\/?([A-Za-z0-9][A-Za-z0-9-]*)\//i.exec(value)
+    || /^ssh:\/\/git@(?:www\.)?github\.com\/([A-Za-z0-9][A-Za-z0-9-]*)\//i.exec(value)
+    || /^https:\/\/api\.github\.com\/repos\/([A-Za-z0-9][A-Za-z0-9-]*)\//i.exec(value);
+  return match ? match[1].toLowerCase() : null;
+}
+function ownerOfRepository(value) {
+  const match = typeof value === 'string' && /^([A-Za-z0-9][A-Za-z0-9-]*)\/[A-Za-z0-9_.-]+$/.exec(value);
+  return match ? match[1].toLowerCase() : githubOwnerOf(value);
+}
+function remoteOwner(prefix, name) {
+  if (!realGit || !/^[A-Za-z0-9._-]+$/.test(name)) return null;
+  try {
+    const result = spawnSync(realGit, [...prefix, 'remote', 'get-url', name], {
+      encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'],
+      env: { ...process.env, PAPERCLIP_GITHUB_OPERATION_ACTIVE: '1', GIT_TERMINAL_PROMPT: '0' },
+    });
+    return result.status === 0 ? githubOwnerOf(String(result.stdout).trim()) : null;
+  } catch { return null; }
+}
+function gitTargetOwner(args) {
+  const prefix = [];
+  let index = 0;
+  for (; index < args.length; index++) {
+    const arg = args[index];
+    if (gitValueOptions.includes(arg)) { if (arg === '-C' && args[index + 1] !== undefined) prefix.push('-C', args[index + 1]); index += 1; continue; }
+    if (gitValueOptions.some(option => arg.startsWith(option + '='))) continue;
+    if (gitFlagOptions.includes(arg)) continue;
+    break;
+  }
+  const rest = args.slice(index + 1);
+  for (const arg of rest) { const owner = githubOwnerOf(arg); if (owner) return owner; }
+  if (args[index] === 'clone') return null;
+  const positional = rest.filter(arg => !arg.startsWith('-'));
+  for (const name of positional.length ? [positional[0], 'origin'] : ['origin']) {
+    const owner = remoteOwner(prefix, name);
+    if (owner) return owner;
+  }
+  return null;
+}
+function ghTargetOwner(args) {
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
+    const value = arg === '-R' || arg === '--repo' ? args[index + 1]
+      : arg.startsWith('--repo=') ? arg.slice(7) : arg.startsWith('-R') && arg.length > 2 ? arg.slice(2) : undefined;
+    const owner = value === undefined ? null : ownerOfRepository(value.replace(/^github\.com\//i, ''));
+    if (owner) return owner;
+  }
+  if (args[0] === 'api') {
+    for (const arg of args.slice(1)) {
+      const match = /^\/?repos\/([A-Za-z0-9][A-Za-z0-9-]*)\//.exec(arg) || /^\/?(?:orgs|users)\/([A-Za-z0-9][A-Za-z0-9-]*)(?:\/|$)/.exec(arg);
+      if (match) return match[1].toLowerCase();
+    }
+  }
+  if (args[0] === 'repo' && args[1] && !['create', 'new', 'list'].includes(args[1])) {
+    const owner = ownerOfRepository(args.slice(2).find(arg => !arg.startsWith('-')));
+    if (owner) return owner;
+  }
+  for (const arg of args) { const owner = githubOwnerOf(arg); if (owner) return owner; }
+  const fromEnvironment = ownerOfRepository(process.env.GH_REPO);
+  if (fromEnvironment) return fromEnvironment;
+  return remoteOwner([], 'origin');
+}
+function targetOwner(args) {
+  try { return program === 'git' ? gitTargetOwner(args) : ghTargetOwner(args); } catch { return null; }
 }
 async function main() {
   let env = { ...process.env };
@@ -102,6 +176,8 @@ ${options.brokerFile ? String.raw`
     try {
     let response;
     if (askBroker && base && env.PAPERCLIP_GITHUB_BROKER_TOKEN) {
+      const owner = targetOwner(process.argv.slice(2));
+      const requestBody = JSON.stringify(owner ? { repositoryOwner: owner } : {});
       const url = base.replace(/\/+$/, '').replace(/\/api$/, '') + '/runtime-tools/github/credentials';
       // A slow or restarting control plane must not cost the operation its
       // managed identity, so a failed request is retried before giving up.
@@ -114,7 +190,7 @@ ${options.brokerFile ? String.raw`
             method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10000),
             headers: { authorization: 'Bearer ' + (env.PAPERCLIP_GITHUB_BRIDGE_TOKEN || env.PAPERCLIP_API_KEY || env.PAPERCLIP_GITHUB_BROKER_TOKEN),
               'x-paperclip-github-capability': env.PAPERCLIP_GITHUB_BROKER_TOKEN, 'content-type': 'application/json' },
-            body: '{}',
+            body: requestBody,
           });
           if (response.status === 409 && conflicts < 29) {
             conflicts += 1;

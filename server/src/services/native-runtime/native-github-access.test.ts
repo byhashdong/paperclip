@@ -291,6 +291,11 @@ it("rejects other scopes, concurrent bindings, browser requests and forged autho
   expect(response.status).toBe(200);
   expect(response.headers.get("cache-control")).toBe("no-store");
   expect(b.resolveCredentials).toHaveBeenCalledExactlyOnceWith(run("a"));
+  // A repository owner only chooses among the bound run's own GitHub accounts.
+  expect((await request(b, { body: JSON.stringify({ repositoryOwner: "Sentinan", runId: "b" }) })).status).toBe(200);
+  expect(b.resolveCredentials).toHaveBeenLastCalledWith({ ...run("a"), repositoryOwner: "sentinan" });
+  expect((await request(b, { body: JSON.stringify({ repositoryOwner: "not an owner!" }) })).status).toBe(200);
+  expect(b.resolveCredentials).toHaveBeenLastCalledWith(run("a"));
   release(); await b.stop();
   expect(() => b.activate(run("b"))).toThrow("closed");
 });

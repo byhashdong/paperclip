@@ -3,6 +3,7 @@ import { AiConnectionPoolConnector } from "@/components/ai-connections/AiConnect
 import { aiConnectionRouterPluginKey } from "@paperclipai/shared";
 import { ConnectionInstructionsSettings } from "@/features/connections/ConnectionInstructions";
 import { HonchoWorkspaceSettings } from "@/features/connections/HonchoWorkspaceSettings";
+import { GitHubOwnersSettings } from "@/features/connections/GitHubOwnersSettings";
 import { BrowserUseSettingsPanel } from "./app-detail/BrowserUseSettingsPanel";
 import { isRetiredComposioConnection, RETIRED_COMPOSIO_MESSAGE, isRemoteMcpConnectorId, isRemoteMcpConnectorMethod } from "@paperclipai/shared";
 import { RemoteMcpManagement } from "@/features/connections/remote-mcp/RemoteMcpManagement";
@@ -667,6 +668,9 @@ function StandardAppDetail({ renderActions, renderAgentSettings, renderConnectio
               {isAppAggregator(brandKey) && grantsQuery.data?.capabilities.canConfigure === true
                 ? <ConnectedAggregatorApps key={connection.id} connection={connection} /> : null}
               {connection.config?.sourceTemplateKey === "honcho" && <HonchoWorkspaceSettings key={connection.id} connection={connection} canConfigure={grantsQuery.data?.capabilities?.canConfigure ?? false} />}
+              {connection.config?.sourceTemplateKey === "github" && connection.connectionPurpose !== "ai"
+                && ["managed", "mcp-key"].includes(String(connection.config?.connectionMethodKey ?? ""))
+                && <GitHubOwnersSettings key={`github-owners-${connection.id}`} connection={connection} canConfigure={grantsQuery.data?.capabilities?.canConfigure ?? false} />}
               {renderConnectionSettings?.(connection)}
               {connection.config?.sourceTemplateKey === "browser-use-cloud" && <BrowserUseSettingsPanel connection={connection} grants={grantsQuery.data} />}
               {connection.config?.sourceTemplateKey === "railway" && <RailwayAccessPanel connection={connection} grants={grantsQuery.data} />}

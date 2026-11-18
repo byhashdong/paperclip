@@ -11,6 +11,8 @@ import {
 } from "@paperclipai/adapter-utils/execution-target";
 import { githubBrokerEnvironment } from "@paperclipai/adapter-utils/github-launcher";
 
+import { normalizeGitHubOwner } from "../tool-access/github-owner-routing.js";
+
 type Binding = { companyId: string; agentId: string; issueId: string; runId: string };
 type LauncherInput = Parameters<typeof prepareGitHubOperationLaunchers>[0];
 export type NativeGitHubAccess = Awaited<ReturnType<typeof createNativeGitHubAccess>>;
@@ -24,7 +26,7 @@ export async function createNativeGitHubAccess(input: {
   target: LauncherInput["target"];
   cwd: string;
   env: NodeJS.ProcessEnv;
-  resolveCredentials: (binding: Binding) => Promise<unknown>;
+  resolveCredentials: (binding: Binding & { repositoryOwner?: string | null }) => Promise<unknown>;
   onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
 }, startBridge = startAdapterExecutionTargetPaperclipBridge) {
   const duplexRequested = adapterExecutionTargetEnablesSandboxDuplexBridge(input.target);
@@ -43,7 +45,15 @@ export async function createNativeGitHubAccess(input: {
   const server = createServer(async (req, res) => {
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("Content-Type", "application/json");
-    req.resume();
+    // The body may carry only a repository-owner routing hint. Read a small
+    // bounded prefix; anything else in it is ignored.
+    const body = new Promise<string>((resolve) => {
+      let text = "";
+      req.setEncoding("utf8");
+      req.on("data", (chunk: string) => { if (text.length < 4_096) text += chunk; });
+      req.on("end", () => resolve(text.slice(0, 4_096)));
+      req.on("error", () => resolve(""));
+    });
     const reply = (status: number, body: unknown) => {
       res.writeHead(status);
       res.end(JSON.stringify(body));
@@ -67,7 +77,13 @@ export async function createNativeGitHubAccess(input: {
     }
     try {
       // Bind at receipt; body/headers cannot select a run or responsible user.
-      const result = await input.resolveCredentials({ ...binding });
+      let repositoryOwner: string | null = null;
+      try {
+        const parsed: unknown = JSON.parse((await body) || "{}");
+        const value = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>).repositoryOwner : null;
+        repositoryOwner = normalizeGitHubOwner(value);
+      } catch { repositoryOwner = null; }
+      const result = await input.resolveCredentials({ ...binding, ...(repositoryOwner ? { repositoryOwner } : {}) });
       if (active !== binding || stopped) {
         reply(403, { error: "GitHub run ended during credential acquisition" });
         return;

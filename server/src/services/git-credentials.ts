@@ -14,6 +14,7 @@ import { and, eq, inArray, or, sql } from "drizzle-orm";
 import { isGitHubDotCom } from "./github-fetch.js";
 import { secretService } from "./secrets.js";
 import { toolAccessService } from "./tool-access.js";
+import { githubOwnerFromRemoteUrl, routeGitHubCandidatesByOwner } from "./tool-access/github-owner-routing.js";
 
 /**
  * Server-side git credentials for managed project checkouts and execution-workspace base
@@ -287,16 +288,22 @@ export function createGitRemoteAuthProvider(
   const secrets: GitCredentialSecretsDeps = deps?.secrets ?? secretService(db);
   const env = deps?.env ?? process.env;
   const secretNames = deps?.secretNames ?? DEFAULT_GITHUB_TOKEN_SECRET_NAMES;
-  let credentialPromise: Promise<GitCredential | null> | null = null;
+  // Several GitHub accounts can be connected, so a credential is resolved
+  // (and memoized) per repository owner rather than once per provider.
+  const credentialPromises = new Map<string, Promise<GitCredential | null>>();
 
-  const resolveCredential = async (): Promise<GitCredential | null> => {
+  const resolveCredential = async (repositoryOwner: string | null): Promise<GitCredential | null> => {
     // Unit callers historically pass a null DB through the typed test seam. Production
     // always supplies a real DB and therefore always checks managed identities before
     // considering legacy secrets or process environment credentials.
     const managed = db
-      ? await resolveManagedGitHubCredential(db, secrets, companyId, context ?? {})
+      ? await resolveManagedGitHubCredential(db, secrets, companyId, { ...(context ?? {}), repositoryOwner })
       : { configured: false as const };
     if (managed.configured) {
+      // No connected account is responsible for this owner. Never borrow
+      // another account's token or a legacy company token; public
+      // repositories still work anonymously.
+      if (!managed.credential && "ownerUnmatched" in managed && managed.ownerUnmatched) return null;
       if (!managed.credential) throw new Error(managed.error ?? "Managed GitHub connection is unavailable");
       return managed.credential;
     }
@@ -327,6 +334,7 @@ export function createGitRemoteAuthProvider(
 
   return async (remoteUrl: string) => {
     if (!isSupportedGitHubRemoteUrl(remoteUrl)) return null;
+    const repositoryOwner = githubOwnerFromRemoteUrl(remoteUrl);
     if (db && context?.heartbeatRunId && context.agentId) {
       const [run] = await db.select({ contextId: heartbeatRuns.activeIdentityContextId }).from(heartbeatRuns).where(and(
         eq(heartbeatRuns.id, context.heartbeatRunId), eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.agentId, context.agentId),
@@ -334,10 +342,10 @@ export function createGitRemoteAuthProvider(
       if (run?.contextId) {
         const { resolveGitHubOperationCredentials } = await import("./github-operation-credentials.js");
         const result = await resolveGitHubOperationCredentials(db, {
-          companyId, runId: context.heartbeatRunId, agentId: context.agentId,
+          companyId, runId: context.heartbeatRunId, agentId: context.agentId, repositoryOwner,
         });
         if (result.status === "absent") {
-          const credential = await resolveCredential();
+          const credential = await resolveCredential(repositoryOwner);
           return credential ? buildGitAuthInvocation(credential) : null;
         }
         const anonymous = buildGitAuthInvocation({ token: "", source: "managed_connection", secretName: null });
@@ -348,11 +356,24 @@ export function createGitRemoteAuthProvider(
         } };
       }
     }
-    credentialPromise ??= resolveCredential();
+    const key = repositoryOwner ?? "";
+    let credentialPromise = credentialPromises.get(key);
+    if (!credentialPromise) {
+      credentialPromise = resolveCredential(repositoryOwner);
+      credentialPromises.set(key, credentialPromise);
+    }
     const credential = await credentialPromise;
     if (!credential) return null;
     return buildGitAuthInvocation(credential);
   };
+}
+
+function isGitHubPersonalAccessTokenConnection(connection: { config?: unknown; transportConfig?: unknown } | undefined) {
+  const config = connection?.config && typeof connection.config === "object" ? connection.config as Record<string, unknown> : {};
+  const transport = connection?.transportConfig && typeof connection.transportConfig === "object"
+    ? connection.transportConfig as Record<string, unknown> : {};
+  return (config.sourceTemplateKey ?? transport.sourceTemplateKey) === "github"
+    && (config.connectionMethodKey ?? transport.connectionMethodKey) === "mcp-key";
 }
 
 export async function resolveManagedGitHubIdentitySelection(
@@ -364,12 +385,20 @@ export async function resolveManagedGitHubIdentitySelection(
     allowStandingDelegation?: boolean;
     excludeGrantId?: string;
     explicitGrantId?: string;
+    /** GitHub user or organization that owns the repository this operation targets. */
+    repositoryOwner?: string | null;
+    /** `catalog` picks a stable connection for tool listings instead of failing. */
+    ownerRoutingMode?: "operation" | "catalog";
+    /** The connection whose own tools or data an ownerless operation uses. */
+    routedConnectionId?: string | null;
   },
 ): Promise<{
   configured: boolean;
   identitySource?: "personal" | "dedicated";
   grant?: typeof connectionGrants.$inferSelect;
   error?: string;
+  /** The named owner is not handled by any connected GitHub account. */
+  ownerUnmatched?: boolean;
 }> {
   const connections = await db.select().from(toolConnections).where(and(
     eq(toolConnections.companyId, companyId),
@@ -428,8 +457,24 @@ export async function resolveManagedGitHubIdentitySelection(
         return grants.filter((grant) => grant.kind === "user" && delegatedIds.has(grant.id));
       })
     : [];
-  const candidates = dedicated.length > 0 ? dedicated : personal.length > 0 ? personal : delegated;
+  const tierCandidates = dedicated.length > 0 ? dedicated : personal.length > 0 ? personal : delegated;
   const identitySource = dedicated.length > 0 ? "dedicated" as const : "personal" as const;
+  // Several GitHub accounts can be connected at once. Send each operation to
+  // the connection responsible for the repository owner, and fail clearly
+  // rather than borrowing another account's credential.
+  const routing = context.explicitGrantId
+    ? { candidates: tierCandidates }
+    : routeGitHubCandidatesByOwner({
+        candidates: tierCandidates,
+        connections: githubConnections,
+        owner: context.repositoryOwner ?? null,
+        mode: context.ownerRoutingMode,
+        connectionId: context.routedConnectionId ?? null,
+      });
+  if (routing.error) {
+    return { configured: true, identitySource, error: routing.error, ...(routing.ownerUnmatched ? { ownerUnmatched: true } : {}) };
+  }
+  const candidates = routing.candidates;
   // Reconnecting can create another connection/grant for the same GitHub
   // account. Ambiguity is about provider identities, not the number of rows.
   // Only trust GitHub's stable account ID; equal logins or missing metadata
@@ -518,9 +563,12 @@ export async function filterResolvedGitHubConnectionsForRun<T extends {
     return config.sourceTemplateKey === "github" || transportConfig.sourceTemplateKey === "github";
   });
   if (githubConnections.length === 0) return input.connections;
+  // One set of GitHub tools is listed even when several accounts are
+  // connected; the gateway routes each call to the responsible connection.
   const selection = await resolveManagedGitHubIdentitySelection(input.db, input.companyId, {
     agentId: input.agentId,
     responsibleUserId: input.responsibleUserId ?? null,
+    ownerRoutingMode: "catalog",
   });
   const selectedConnectionId = selection.grant?.connectionId ?? null;
   const githubIds = new Set(githubConnections.map((connection) => connection.id));
@@ -540,13 +588,21 @@ export async function resolveManagedGitHubCredential(
     agentId?: string | null;
     allowStandingDelegation?: boolean;
     explicitGrantId?: string;
+    repositoryOwner?: string | null;
   },
-): Promise<{ configured: boolean; identitySource?: "personal" | "dedicated"; credential?: GitCredential; error?: string }> {
+): Promise<{ configured: boolean; identitySource?: "personal" | "dedicated"; credential?: GitCredential; error?: string; ownerUnmatched?: boolean }> {
   const selection = await resolveManagedGitHubIdentitySelection(db, companyId, context);
   if (!selection.configured) return { configured: false };
-  if (!selection.grant) return { configured: true, identitySource: selection.identitySource, error: selection.error };
+  if (!selection.grant) {
+    return {
+      configured: true, identitySource: selection.identitySource, error: selection.error,
+      ...(selection.ownerUnmatched ? { ownerUnmatched: true } : {}),
+    };
+  }
   const acquire = async (selection: Awaited<ReturnType<typeof resolveManagedGitHubIdentitySelection>>) => {
     let grant = selection.grant!;
+    const [selectedConnection] = await db.select({ config: toolConnections.config, transportConfig: toolConnections.transportConfig })
+      .from(toolConnections).where(and(eq(toolConnections.companyId, companyId), eq(toolConnections.id, grant.connectionId)));
     if (grant.kind === "user" && grant.subjectUserId) {
       const [membership] = await db.select({ id: companyMemberships.id, role: companyMemberships.membershipRole }).from(companyMemberships).where(and(
         eq(companyMemberships.companyId, companyId),
@@ -574,10 +630,17 @@ export async function resolveManagedGitHubCredential(
         heartbeatRunId: context.heartbeatRunId,
       });
     }
-    const accessRef = grant.credentialSecretRefs.find((ref) => ref.configPath === "oauth.access_token");
+    // A personal access token connection stores the token GitHub's MCP server
+    // receives as its Authorization header. The same token authenticates Git
+    // and gh for that account; it has no OAuth access snapshot.
+    const personalAccessToken = isGitHubPersonalAccessTokenConnection(selectedConnection);
+    const accessRef = grant.credentialSecretRefs.find((ref) => ref.configPath === "oauth.access_token")
+      ?? (personalAccessToken
+        ? grant.credentialSecretRefs.find((ref) => ref.configPath === "credentials.authorization")
+        : undefined);
     const github = grant.providerTenant?.github;
-    if (!accessRef || !github) return { configured: true, identitySource: selection.identitySource, error: "The managed GitHub identity is incomplete" };
-    if (github.installationCount < 1 || github.repositoryCount < 1) {
+    if (!accessRef || (!github && !personalAccessToken)) return { configured: true, identitySource: selection.identitySource, error: "The managed GitHub identity is incomplete" };
+    if (github && !personalAccessToken && (github.installationCount < 1 || github.repositoryCount < 1)) {
       return { configured: true, identitySource: selection.identitySource, error: "The managed GitHub identity no longer has repository access" };
     }
     const accessContext = {
@@ -613,13 +676,15 @@ export async function resolveManagedGitHubCredential(
     } else {
       token = await secrets.resolveSecretValue(companyId, accessRef.secretId, accessRef.versionSelector ?? "latest", { accessContext });
     }
+    if (personalAccessToken) token = token.trim().replace(/^(?:bearer|token)\s+/i, "").trim();
+    if (!token) return { configured: true, identitySource: selection.identitySource, error: "The personal GitHub credential is missing" };
     return {
       configured: true, identitySource: selection.identitySource,
       credential: {
         token,
         source: "managed_connection" as const,
         secretName: null,
-        githubIdentity: { userId: github.userId, login: github.login },
+        ...(github?.userId && github.login ? { githubIdentity: { userId: github.userId, login: github.login } } : {}),
         identitySource: grant.kind === "agent" ? "dedicated" as const : "personal" as const,
         connectionId: grant.connectionId,
         grantId: grant.id,

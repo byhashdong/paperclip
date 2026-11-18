@@ -384,7 +384,7 @@ export function connectionIntentService(db: Db) {
       && !isToolConnectionAttentionHealth(connection.healthStatus) ? connection : null;
     if (input.serviceSlug === "github") {
       const selection = await resolveManagedGitHubIdentitySelection(db, input.companyId, {
-        agentId: input.agentId, responsibleUserId: input.responsibleUserId,
+        agentId: input.agentId, responsibleUserId: input.responsibleUserId, ownerRoutingMode: "catalog",
       });
       return usable(matching.find((connection) => connection.id === selection.grant?.connectionId));
     }

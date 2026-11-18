@@ -18,6 +18,7 @@ import {
 import { secretService } from "./secrets.js";
 import { resolveCoreTrustPreset } from "./trust-preset-resolver.js";
 import { isLowTrustQuarantined } from "./source-trust.js";
+import { normalizeGitHubOwner } from "./tool-access/github-owner-routing.js";
 
 export type GitHubCredentialSummary = {
   status: "available" | "absent" | "unavailable";
@@ -123,6 +124,8 @@ export async function resolveGitHubOperationCredentials(
     companyId: string;
     agentId: string;
     runId: string;
+    /** Owner of the repository the operation targets; routes between GitHub accounts. */
+    repositoryOwner?: string | null;
   },
 ) {
   const { run, context } = await captureRunIdentity(db, input, { readScope: "github_credentials" });
@@ -164,6 +167,7 @@ export async function resolveGitHubOperationCredentials(
           typeof run.contextSnapshot?.issueId === "string"
             ? run.contextSnapshot.issueId
             : null,
+        repositoryOwner: normalizeGitHubOwner(input.repositoryOwner),
       },
     );
     if (resolved.credential) {

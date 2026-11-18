@@ -365,6 +365,59 @@ process.stdout.write(JSON.stringify({identity, token:process.env.GH_TOKEN ?? nul
     expect(env.GH_TOKEN).toBe("");
     expect(env.GIT_AUTHOR_NAME).toBe("");
   });
+  it("names the repository owner each command targets so Paperclip can pick that owner's GitHub account", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-github-owner-hint-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const bin = path.join(root, "managed"), real = path.join(root, "real");
+    await mkdir(bin);
+    await mkdir(real);
+    await writeFile(path.join(bin, "git"), githubLauncherSource(), { mode: 0o700 });
+    await writeFile(path.join(bin, "gh"), githubLauncherSource(), { mode: 0o700 });
+    await writeFile(path.join(real, "gh"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    // Network commands succeed offline; local commands use the system Git.
+    await writeFile(path.join(real, "git"), [
+      "#!/bin/sh",
+      'for arg in "$@"; do case "$arg" in fetch|clone|ls-remote|push|pull) exit 0;; esac; done',
+      'exec /usr/bin/git "$@"',
+      "",
+    ].join("\n"), { mode: 0o700 });
+    const bodies: unknown[] = [];
+    const server = createServer((req, res) => {
+      let body = "";
+      req.on("data", chunk => { body += chunk; });
+      req.on("end", () => {
+        bodies.push(JSON.parse(body));
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ status: "unavailable", reason: "test" }));
+      });
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>(resolve => server.close(() => resolve())));
+    const { port } = server.address() as { port: number };
+    const env = { ...process.env, ...githubBrokerEnvironment({}, { url: `http://127.0.0.1:${port}`, token: "run-capability" }), PATH: `${bin}:${real}:${process.env.PATH}` };
+    const run = async (program: string, args: string[], cwd = root) => {
+      const before = bodies.length;
+      await exec(path.join(bin, program), args, { cwd, env }).catch(() => undefined);
+      return bodies.slice(before);
+    };
+    await run("git", ["init", "-q", "repo"]);
+    const repo = path.join(root, "repo");
+    await run("git", ["-C", "repo", "remote", "add", "origin", "https://github.com/Sentinan/ecg-reporting.git"]);
+    await run("git", ["-C", "repo", "remote", "add", "personal", "git@github.com:byhashdong/paperclip.git"]);
+    expect(await run("git", ["-C", "repo", "fetch", "--dry-run"])).toEqual([{ repositoryOwner: "sentinan" }]);
+    expect(await run("git", ["fetch", "personal"], repo)).toEqual([{ repositoryOwner: "byhashdong" }]);
+    expect(await run("git", ["clone", "https://github.com/web-biotech/lims.git", "lims"])).toEqual([{ repositoryOwner: "web-biotech" }]);
+    expect(await run("git", ["ls-remote", "https://gitlab.com/x/y.git"])).toEqual([{}]);
+    expect(await run("gh", ["pr", "list", "-R", "sentinan/ecg-reporting"])).toEqual([{ repositoryOwner: "sentinan" }]);
+    expect(await run("gh", ["issue", "view", "3", "--repo=byhashdong/paperclip"])).toEqual([{ repositoryOwner: "byhashdong" }]);
+    expect(await run("gh", ["api", "repos/web-biotech/lims/pulls"])).toEqual([{ repositoryOwner: "web-biotech" }]);
+    expect(await run("gh", ["repo", "view", "byhashdong/paperclip"])).toEqual([{ repositoryOwner: "byhashdong" }]);
+    expect(await run("gh", ["pr", "view", "https://github.com/sentinan/ecg-reporting/pull/7"])).toEqual([{ repositoryOwner: "sentinan" }]);
+    // Inside a checkout, gh uses that repository's origin.
+    expect(await run("gh", ["pr", "list"], repo)).toEqual([{ repositoryOwner: "sentinan" }]);
+    expect(await run("gh", ["auth", "status"])).toEqual([{}]);
+  }, 30_000);
+
   it("keeps local Git commands off the broker and still asks for the rest", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-github-local-skip-"));
     cleanups.push(() => rm(root, { recursive: true, force: true }));

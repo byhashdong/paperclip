@@ -53,8 +53,12 @@ export function runtimeConnectionIntentRoutes(db: Db) {
       ? req.headers["x-paperclip-github-capability"] : bearer(req), "github_credentials");
     if (!claims) throw unauthorized("Invalid GitHub runtime capability");
     res.setHeader("Cache-Control", "no-store");
+    // The owner is only a routing hint between this run's own GitHub
+    // accounts; the run and responsible person still come from the claims.
+    const body = req.body && typeof req.body === "object" ? req.body as Record<string, unknown> : {};
     res.json(await resolveGitHubOperationCredentials(db, {
       companyId: claims.company_id, agentId: claims.sub, runId: claims.run_id,
+      repositoryOwner: typeof body.repositoryOwner === "string" ? body.repositoryOwner : null,
     }));
   });
 

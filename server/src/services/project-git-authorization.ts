@@ -210,6 +210,7 @@ export function projectGitAuthorizationService(db: Db) {
           companyId: input.companyId,
           runId: scope.runId,
           agentId: scope.agentId,
+          repositoryOwner: repo.fullName.split("/")[0] ?? null,
         });
         if (result.status !== "available") throw forbidden(result.reason ?? "Run GitHub authorization unavailable");
         return transientGitToken(result.env.PAPERCLIP_GIT_TOKEN);
