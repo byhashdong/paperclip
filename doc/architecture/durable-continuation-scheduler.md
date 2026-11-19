@@ -22,6 +22,11 @@ The heartbeat scheduler is enabled unless
 `HEARTBEAT_SCHEDULER_INTERVAL_MS` and defaults to 30,000 ms. The configured
 value is clamped to a minimum of 10,000 ms.
 
+`HEARTBEAT_TIMER_WAKEUPS_ENABLED=false` keeps the scheduler (restart recovery,
+reconciliation, cleanup, issue monitors) but stops the two timer-driven wake
+sources: agent interval heartbeats and scheduled routine triggers. It defaults
+to `true`, and it has no effect when the scheduler itself is disabled.
+
 Continuation recovery runs:
 
 - once during server startup, after orphaned runs are reaped, due retries are

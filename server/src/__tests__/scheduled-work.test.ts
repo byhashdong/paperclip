@@ -13,7 +13,7 @@ afterEach(async () => {
   vi.useRealTimers();
 });
 
-function fixture(input: { routine?: number | null; monitor?: number | null; tickIssueMonitors?: () => Promise<void>; tickRoutines?: () => Promise<void> } = {}) {
+function fixture(input: { routine?: number | null; monitor?: number | null; timer?: number | null; timerWakeupsEnabled?: boolean; tickIssueMonitors?: () => Promise<void>; tickRoutines?: () => Promise<void> } = {}) {
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2020-01-01T00:00:00.000Z"));
   const dialect = new PgDialect();
@@ -49,14 +49,43 @@ function fixture(input: { routine?: number | null; monitor?: number | null; tick
     if (failRead) throw new Error("database unavailable");
     return deadlines.routine;
   });
+  const nextAgentTimerAt = vi.fn(async () => input.timer ?? null);
   const workers = registerScheduledWork(coordinator,
-    { retryMs: 60_000, nextAgentTimerAt: async () => null, tickAgentTimers, tickIssueMonitors, nextIssueMonitorAt, tickRoutines, nextRoutineRunAt, canRun: () => canRun });
-  return { coordinator, workers, owner, deadlines, execute, nextRoutineRunAt, nextIssueMonitorAt, tickAgentTimers, tickIssueMonitors, tickRoutines, errors,
+    { retryMs: 60_000, nextAgentTimerAt, tickAgentTimers, tickIssueMonitors, nextIssueMonitorAt, tickRoutines, nextRoutineRunAt, canRun: () => canRun,
+      ...(input.timerWakeupsEnabled === undefined ? {} : { timerWakeupsEnabled: input.timerWakeupsEnabled }) });
+  return { coordinator, workers, owner, deadlines, execute, nextRoutineRunAt, nextIssueMonitorAt, nextAgentTimerAt, tickAgentTimers, tickIssueMonitors, tickRoutines, errors,
     ready: () => Promise.all([workers.routines.ready, workers.monitors.ready, workers.timers.ready]),
     canRun: (value: boolean) => { canRun = value; }, canReconcile: (value: boolean) => { canReconcile = value; }, failRead: (value: boolean) => { failRead = value; } };
 }
 
 describe("scheduled routine and monitor deadlines", () => {
+  it("with timer wakeups off, never reads or ticks due agent timers or routines but still fires monitors", async () => {
+    const now = Date.UTC(2020, 0, 1);
+    const f = fixture({ timerWakeupsEnabled: false, timer: now - 1000, routine: now - 1000, monitor: now + 10_000 });
+    await f.ready();
+    for (let i = 0; i < 3; i++) {
+      f.workers.timers.wake();
+      f.workers.routines.wake();
+      await f.owner.transaction(tx => notifyDeliveryWork(tx, DELIVERY_QUEUES.agentTimers));
+      await f.owner.transaction(tx => notifyDeliveryWork(tx, DELIVERY_QUEUES.routineSchedules));
+      await vi.advanceTimersByTimeAsync(60_000);
+    }
+    expect(f.nextAgentTimerAt).not.toHaveBeenCalled();
+    expect(f.tickAgentTimers).not.toHaveBeenCalled();
+    expect(f.nextRoutineRunAt).not.toHaveBeenCalled();
+    expect(f.tickRoutines).not.toHaveBeenCalled();
+    expect(f.tickIssueMonitors).toHaveBeenCalledTimes(2);
+    expect(f.coordinator.nextWakeAt()).toBeNull();
+  });
+
+  it("keeps ticking due agent timers by default", async () => {
+    const now = Date.UTC(2020, 0, 1);
+    const f = fixture({ timer: now - 1000 });
+    await f.ready();
+    expect(f.nextAgentTimerAt).toHaveBeenCalled();
+    expect(f.tickAgentTimers).toHaveBeenCalled();
+  });
+
   it.each(["run", "deadline read"])("retains a monitor pass interrupted during %s by a maintenance drain", async boundary => {
     const f = fixture({ tickIssueMonitors: async () => { if (boundary === "run") startTaskDrain(); } });
     if (boundary === "deadline read") f.nextIssueMonitorAt.mockImplementationOnce(async () => { startTaskDrain(); return null; });

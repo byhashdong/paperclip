@@ -2057,8 +2057,12 @@ async function startServerWithDatabaseTeardown(
           () => !isIdleTaskDrainActive() && !isWarmStandby() && !heartbeatSchedulerStopped);
         trackHeartbeatSchedulerWork(status.ready);
       }
+      if (config.heartbeatTimerWakeupsEnabled === false) {
+        logger.info("heartbeat timer wakeups disabled (HEARTBEAT_TIMER_WAKEUPS_ENABLED=false): agent interval timers and scheduled routine triggers will not start runs; restart recovery, cleanup and issue monitors stay on");
+      }
       const scheduled = registerScheduledWork(deliveryWork, {
         retryMs: config.heartbeatSchedulerIntervalMs,
+        timerWakeupsEnabled: config.heartbeatTimerWakeupsEnabled,
         tickAgentTimers: async signal => {
           const result = await heartbeat.tickAgentTimers(new Date(),
             () => !signal.aborted && readTaskDrain(new Date()) === null && !isWarmStandby() && !heartbeatSchedulerStopped);
@@ -2191,6 +2195,7 @@ async function startServerWithDatabaseTeardown(
         migrationSummary,
         heartbeatSchedulerEnabled: config.heartbeatSchedulerEnabled,
         heartbeatSchedulerIntervalMs: config.heartbeatSchedulerIntervalMs,
+        heartbeatTimerWakeupsEnabled: config.heartbeatTimerWakeupsEnabled,
         databaseBackupEnabled: config.databaseBackupEnabled,
         databaseBackupIntervalMinutes: config.databaseBackupIntervalMinutes,
         databaseBackupRetentionDays: config.databaseBackupRetentionDays,

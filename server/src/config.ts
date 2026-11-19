@@ -119,6 +119,12 @@ export interface Config extends StorageConfig {
   feedbackExportBackendToken: string | undefined;
   heartbeatSchedulerEnabled: boolean;
   heartbeatSchedulerIntervalMs: number;
+  /**
+   * Whether the heartbeat scheduler wakes agents on their own interval timers
+   * and fires scheduled routine triggers. When false, the scheduler still runs
+   * restart recovery, run reconciliation, cleanup and issue monitors.
+   */
+  heartbeatTimerWakeupsEnabled: boolean;
   companyDeletionEnabled: boolean;
   telemetryEnabled: boolean;
   announcementsEnabled: boolean;
@@ -441,6 +447,7 @@ export function loadConfig(override?: PaperclipConfig | null): Config {
     feedbackExportBackendToken,
     heartbeatSchedulerEnabled: process.env.HEARTBEAT_SCHEDULER_ENABLED !== "false",
     heartbeatSchedulerIntervalMs: Math.max(10000, Number(process.env.HEARTBEAT_SCHEDULER_INTERVAL_MS) || 30000),
+    heartbeatTimerWakeupsEnabled: process.env.HEARTBEAT_TIMER_WAKEUPS_ENABLED !== "false",
     companyDeletionEnabled,
     telemetryEnabled: fileConfig?.telemetry?.enabled ?? true,
     announcementsEnabled: process.env.PAPERCLIP_ANNOUNCEMENTS_ENABLED !== "false",

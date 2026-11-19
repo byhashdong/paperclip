@@ -382,6 +382,7 @@ function buildTestConfig(overrides: Record<string, unknown> = {}) {
     feedbackExportBackendToken: "telemetry-token",
     heartbeatSchedulerEnabled: false,
     heartbeatSchedulerIntervalMs: 30000,
+    heartbeatTimerWakeupsEnabled: true,
     companyDeletionEnabled: false,
     ...overrides,
   };
@@ -1600,6 +1601,45 @@ describe("startServer feedback export wiring", () => {
       } finally { intervals.mockRestore(); vi.unstubAllEnvs(); }
     },
   );
+
+  it("runs restart recovery and issue monitors but never ticks agent timers or routines when timer wakeups are off", async () => {
+    loadConfigMock.mockReturnValue(buildTestConfig({
+      heartbeatSchedulerEnabled: true,
+      heartbeatSchedulerIntervalMs: 30000,
+      heartbeatTimerWakeupsEnabled: false,
+    }));
+    // A timer and a routine that are already due would start runs if read.
+    heartbeatServiceMock.nextAgentTimerAt.mockImplementation(async () => Date.now() - 1000 as never);
+    routineServiceMock.nextScheduledTriggerAt.mockImplementation(async () => new Date(Date.now() - 1000) as never);
+    heartbeatServiceMock.nextIssueMonitorAt.mockImplementation(async () => Date.now() - 1000 as never);
+    try {
+      await startServer();
+      await settleStartupHousekeeping();
+
+      // Runs whose process vanished in the restart are classified at startup.
+      expect(heartbeatServiceMock.recoverNativeRunsAfterRestart).toHaveBeenCalledWith(expect.any(Date), undefined, { skipDelegatedWork: true });
+      expect(heartbeatServiceMock.reconcileHotRestartAdoption).toHaveBeenCalled();
+      expect(heartbeatServiceMock.registerResidualRecoveryWork).toHaveBeenCalledTimes(1);
+      expect(heartbeatServiceMock.registerIssueStateRecoveryWork).toHaveBeenCalledTimes(1);
+      expect(heartbeatServiceMock.registerRunDispatchWork).toHaveBeenCalledTimes(1);
+      expect(deliveryWorkRegisterMock.mock.calls.some(([queue]) => queue === DELIVERY_QUEUES.environmentCleanup)).toBe(true);
+
+      // Agent-requested monitors still fire.
+      expect(deliveryWorkRegisterMock.mock.calls.some(([queue]) => queue === DELIVERY_QUEUES.issueMonitors)).toBe(true);
+      expect(heartbeatServiceMock.tickIssueMonitors).toHaveBeenCalled();
+
+      // Interval timers and scheduled routines never read a deadline or start a run.
+      expect(deliveryWorkRegisterMock.mock.calls.some(([queue]) => queue === DELIVERY_QUEUES.agentTimers)).toBe(true);
+      expect(heartbeatServiceMock.nextAgentTimerAt).not.toHaveBeenCalled();
+      expect(heartbeatServiceMock.tickAgentTimers).not.toHaveBeenCalled();
+      expect(routineServiceMock.nextScheduledTriggerAt).not.toHaveBeenCalled();
+      expect(routineServiceMock.tickScheduledTriggers).not.toHaveBeenCalled();
+    } finally {
+      heartbeatServiceMock.nextAgentTimerAt.mockImplementation(async () => null);
+      routineServiceMock.nextScheduledTriggerAt.mockImplementation(async () => null);
+      heartbeatServiceMock.nextIssueMonitorAt.mockImplementation(async () => null);
+    }
+  });
 
   it("keeps routine ticks and setup cleanup active when heartbeat scheduling is suppressed", async () => {
     loadConfigMock.mockReturnValue(buildTestConfig({

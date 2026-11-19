@@ -14,11 +14,23 @@ export function registerScheduledWork(
     tickRoutines: (signal: AbortSignal) => Promise<unknown>;
     nextRoutineRunAt: () => Promise<number | null>;
     canRun: () => boolean;
+    /**
+     * False keeps agent interval timers and scheduled routine triggers from
+     * waking anything; issue monitors still fire at their saved deadlines.
+     * Defaults to true.
+     */
+    timerWakeupsEnabled?: boolean;
   },
 ) {
+  const timerWakeups = options.timerWakeupsEnabled !== false;
+  // With timer wakeups off both queues stay registered, so commit notifications
+  // and idle bookkeeping behave as usual, but they never read a deadline or
+  // enqueue a run.
+  const noDeadline = async () => null;
+  const noRun = async () => undefined;
   const routines = registerDeadlineWork(coordinator, DELIVERY_QUEUES.routineSchedules, {
-    run: options.tickRoutines,
-    next: options.nextRoutineRunAt,
+    run: timerWakeups ? options.tickRoutines : noRun,
+    next: timerWakeups ? options.nextRoutineRunAt : noDeadline,
     canRun: options.canRun,
     retryMs: options.retryMs,
   });
@@ -30,8 +42,8 @@ export function registerScheduledWork(
     notificationCoalesceMs: options.retryMs,
   });
   const timers = registerDeadlineWork(coordinator, DELIVERY_QUEUES.agentTimers, {
-    run: options.tickAgentTimers,
-    next: options.nextAgentTimerAt,
+    run: timerWakeups ? options.tickAgentTimers : noRun,
+    next: timerWakeups ? options.nextAgentTimerAt : noDeadline,
     canRun: () => options.canRun() && readTaskDrain(new Date()) === null,
     retryMs: options.retryMs,
     notificationCoalesceMs: options.retryMs,

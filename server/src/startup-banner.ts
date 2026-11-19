@@ -30,6 +30,7 @@ type StartupBannerOptions = {
   migrationSummary: string;
   heartbeatSchedulerEnabled: boolean;
   heartbeatSchedulerIntervalMs: number;
+  heartbeatTimerWakeupsEnabled?: boolean;
   databaseBackupEnabled: boolean;
   databaseBackupIntervalMinutes: number;
   databaseBackupRetentionDays: number;
@@ -127,9 +128,11 @@ export function printStartupBanner(opts: StartupBannerOptions): void {
       ? `${opts.db.dataDir} ${color(`(pg:${opts.db.port})`, "dim")}`
       : redactConnectionString(opts.db.connectionString);
 
-  const heartbeat = opts.heartbeatSchedulerEnabled
-    ? `enabled ${color(`(${opts.heartbeatSchedulerIntervalMs}ms)`, "dim")}`
-    : color("disabled", "yellow");
+  const heartbeat = !opts.heartbeatSchedulerEnabled
+    ? color("disabled", "yellow")
+    : opts.heartbeatTimerWakeupsEnabled === false
+      ? `recovery only ${color(`(${opts.heartbeatSchedulerIntervalMs}ms, timer wakeups off)`, "dim")}`
+      : `enabled ${color(`(${opts.heartbeatSchedulerIntervalMs}ms)`, "dim")}`;
   const dbBackup = opts.databaseBackupEnabled
     ? `enabled ${color(`(every ${opts.databaseBackupIntervalMinutes}m, keep ${opts.databaseBackupRetentionDays}d)`, "dim")}`
     : color("disabled", "yellow");

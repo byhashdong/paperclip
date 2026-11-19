@@ -144,6 +144,7 @@ function collectDeploymentEnvRows(config: PaperclipConfig | null, configPath: st
 
   const heartbeatInterval = process.env.HEARTBEAT_SCHEDULER_INTERVAL_MS ?? DEFAULT_HEARTBEAT_SCHEDULER_INTERVAL_MS;
   const heartbeatEnabled = process.env.HEARTBEAT_SCHEDULER_ENABLED ?? "true";
+  const heartbeatTimerWakeups = process.env.HEARTBEAT_TIMER_WAKEUPS_ENABLED ?? "true";
   const secretsProvider =
     process.env.PAPERCLIP_SECRETS_PROVIDER ??
     config?.secrets?.provider ??
@@ -267,6 +268,13 @@ function collectDeploymentEnvRows(config: PaperclipConfig | null, configPath: st
       source: process.env.HEARTBEAT_SCHEDULER_ENABLED ? "env" : "default",
       required: false,
       note: "Set to `false` to disable timer scheduling",
+    },
+    {
+      key: "HEARTBEAT_TIMER_WAKEUPS_ENABLED",
+      value: heartbeatTimerWakeups,
+      source: process.env.HEARTBEAT_TIMER_WAKEUPS_ENABLED ? "env" : "default",
+      required: false,
+      note: "Set to `false` to keep restart recovery and issue monitors but stop agent interval timers and scheduled routines",
     },
     {
       key: "PAPERCLIP_SECRETS_PROVIDER",
