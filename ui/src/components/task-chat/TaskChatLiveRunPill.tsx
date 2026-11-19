@@ -10,6 +10,7 @@ import { useTaskChatShimmer } from "./TaskChatShimmer";
 import { AgentQueueWait } from "@/components/AgentQueueWait";
 import { agentQueueWaitOf } from "@/lib/agent-queue-wait";
 import { WAITING_TO_START_LABEL, useWaitingToStart } from "./useWaitingToStart";
+import { useLiveExecutionActivity } from "./RunActivityStatus";
 
 /**
  * "ran N commands, called M tools" for the live tail's status pill, counted off
@@ -69,6 +70,8 @@ export function TaskChatLiveRunPill({
   const holdLabel = status === "queued" && execution?.cause ? execution.label : null;
   // Past the startup grace period with no named hold, the turn says it waits.
   const waitingToStart = useWaitingToStart(status === "queued" && !holdLabel && !agentQueue, startedAtMs);
+  // What the run is doing now (generating, a tool, reconnecting, stalled) replaces the generic verb.
+  const activity = useLiveExecutionActivity(execution, status);
   // One shared page-wide ticker drives the live elapsed readout, matching the
   // default view's `useLiveElapsed`.
   useSecondTick(active && startedAtMs != null && !agentQueue);
@@ -79,7 +82,7 @@ export function TaskChatLiveRunPill({
     ? formatDurationWords(elapsedMs)
     : null;
   const failed = ["failed", "timed_out", "cancelled", "interrupted"].includes(status);
-  const verb = active ? holdLabel ?? (waitingToStart ? WAITING_TO_START_LABEL : "Working") : failed ? "Stopped" : "Worked";
+  const verb = active ? holdLabel ?? (waitingToStart ? WAITING_TO_START_LABEL : activity?.label ?? "Working") : failed ? "Stopped" : "Worked";
   const suffix = elapsed ? `for ${elapsed}` : null;
 
   if (agentQueue) {

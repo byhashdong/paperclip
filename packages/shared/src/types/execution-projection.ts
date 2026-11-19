@@ -72,6 +72,14 @@ export interface ExecutionProjection {
   successorRunId: string | null;
   /** Set when phase is "queued" because the agent's concurrency limit is full (cause "agent_at_capacity"). */
   agentQueue?: ExecutionAgentQueue | null;
+  /**
+   * What the run is doing now (generating, running a tool, reconnecting,
+   * cleaning up, waiting for input, no effective action, suspected stall),
+   * classified at read time. Clients re-run classifyExecutionActivity with
+   * these facts against their clock so a silent run escalates without a new
+   * server event. Null for phases the label already explains.
+   */
+  activity?: import("../execution-activity.js").ExecutionActivity | null;
 }
 
 /** These incidents require an explicit reconciliation, never a generic Retry. */

@@ -126,6 +126,7 @@ import {
   responsibleUserLabel,
 } from "@paperclipai/shared";
 import { ResponsibleUserDenialNotice } from "../components/ResponsibleUserDenialNotice";
+import { RunActivityStatus } from "@/components/task-chat/RunActivityStatus";
 import { RunWorkspaceRecoverySurface } from "../components/RunWorkspaceRecoverySurface";
 import { RunnerInspector } from "../components/RunnerInspector";
 import { HoneycombRunLink } from "../components/HoneycombRunLink";
@@ -3214,6 +3215,8 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
       <RunWorkspaceRecoverySurface run={run} />
       <AiConnectionPoolRunDetails context={run.contextSnapshot} />
       {grokWork && <p className="text-sm text-muted-foreground">Runs in Grok Bot. Usage not reported. Stopping this session revokes Paperclip authority; remote execution may continue. Open the Grok Bot desktop app to inspect it. This view contains Paperclip-reported activity.</p>}
+      {/* What the live run is doing now; the same projection the task page and API show. */}
+      <RunActivityStatus execution={run.execution} status={run.status} />
       {/* Run summary card */}
       <div className="border border-border rounded-lg overflow-hidden">
         <div className="flex flex-col sm:flex-row">

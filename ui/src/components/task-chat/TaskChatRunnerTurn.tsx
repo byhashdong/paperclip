@@ -2,6 +2,7 @@ import { groupImageResources } from "./image-resources";
 import { AgentQueueWait } from "@/components/AgentQueueWait";
 import { agentQueueWaitOf } from "@/lib/agent-queue-wait";
 import { WAITING_TO_START_LABEL, useWaitingToStart } from "./useWaitingToStart";
+import { RunActivityStatus, useLiveExecutionActivity } from "./RunActivityStatus";
 import { McpAppTurnViews, mcpAppRunRefreshKey } from "@/components/mcp-app/McpAppTurnViews";
 import { ToolCallProgressRunProvider } from "./tool-call-progress";
 import { useRef, type ReactNode } from "react";
@@ -115,11 +116,22 @@ function RunnerTurnStatus({
   );
 }
 
-function RunnerCurrentActivityTail({ status, waitingLabel }: { status: string; waitingLabel?: string | null }) {
+/** Activity states in which the agent is visibly working; the others are waits or warnings. */
+const SHIMMER_ACTIVITY_STATES = new Set(["generating", "running_tool", "waiting_for_model"]);
+
+function RunnerCurrentActivityTail({ status, waitingLabel, activityLabel, activityState }: {
+  status: string;
+  waitingLabel?: string | null;
+  /** The run's classified activity; replaces the generic "Thinking" while known. */
+  activityLabel?: string | null;
+  activityState?: string | null;
+}) {
   const shimmer = useTaskChatShimmer("working");
   if (isTerminalRunStatus(status)) return null;
-  return <div className="mt-2 flex min-h-8 min-w-0 items-center gap-2 px-1 py-1 text-xs text-muted-foreground" data-testid="task-chat-current-activity" data-turn-position="tail">
-    <span className={cn(!waitingLabel && shimmer && "shimmer-text shimmer-text-muted")} aria-live="polite" data-testid="task-chat-current-activity-label">{waitingLabel ?? "Thinking"}</span>
+  const label = waitingLabel ?? activityLabel ?? "Thinking";
+  const animated = !waitingLabel && shimmer && (!activityState || SHIMMER_ACTIVITY_STATES.has(activityState));
+  return <div className="mt-2 flex min-h-8 min-w-0 items-center gap-2 px-1 py-1 text-xs text-muted-foreground" data-testid="task-chat-current-activity" data-turn-position="tail" data-activity-state={activityState ?? undefined}>
+    <span className={cn(animated && "shimmer-text shimmer-text-muted")} aria-live="polite" data-testid="task-chat-current-activity-label">{label}</span>
   </div>;
 }
 
@@ -153,14 +165,24 @@ function agentQueueWaitFor({ status, execution }: Pick<RunnerHeaderProps, "statu
   return status === "queued" ? agentQueueWaitOf(execution) : null;
 }
 
+/** Run detail link for the activity alert's next step. */
+function runDetailHref(agentId: string | null | undefined, runId: string | null | undefined) {
+  return agentId && runId ? `/agents/${agentId}/runs/${runId}` : null;
+}
+
 /** One identity stays mounted while admission discovers the run's renderer. */
 export function TaskChatRunnerHeader({ statusContent, ...props }: RunnerHeaderProps & { statusContent?: ReactNode }) {
   const waitingToStart = useRunnerWaitingToStart(props);
-  return <div className="flex min-h-8 min-w-0 items-center gap-2 pb-1 pt-2" data-testid="task-chat-runner-identity-row">
-    {props.agentName ? <TaskChatAgentIdentity agentName={props.agentName} agentIcon={props.agentIcon} agent={props.agent} /> : null}
-    {statusContent ?? (agentQueueWaitFor(props) ? <AgentQueueWait queue={agentQueueWaitFor(props)!} /> : null) ?? <RunnerTurnStatus status={props.status} startedAtMs={props.startedAtMs} finishedAtMs={props.finishedAtMs}
-      continuedAfterSteering={props.continuedAfterSteering} waitingLabel={runnerWaitingLabel(props, waitingToStart)} />}
-  </div>;
+  const activity = useLiveExecutionActivity(props.runId ? props.execution : null, props.status);
+  return <>
+    <div className="flex min-h-8 min-w-0 items-center gap-2 pb-1 pt-2" data-testid="task-chat-runner-identity-row">
+      {props.agentName ? <TaskChatAgentIdentity agentName={props.agentName} agentIcon={props.agentIcon} agent={props.agent} /> : null}
+      {statusContent ?? (agentQueueWaitFor(props) ? <AgentQueueWait queue={agentQueueWaitFor(props)!} /> : null) ?? <RunnerTurnStatus status={props.status} startedAtMs={props.startedAtMs} finishedAtMs={props.finishedAtMs}
+        continuedAfterSteering={props.continuedAfterSteering} waitingLabel={runnerWaitingLabel(props, waitingToStart) ?? activity?.label ?? null} />}
+    </div>
+    {activity ? <RunActivityStatus execution={props.execution} status={props.status}
+      runHref={runDetailHref(props.agent?.id, props.runId)} className="pb-1" /> : null}
+  </>;
 }
 
 export function TaskChatRunnerTurn({
@@ -217,6 +239,7 @@ export function TaskChatRunnerTurn({
   const terminal = isTerminalRunStatus(status);
   const waitingToStart = useRunnerWaitingToStart({ runId, status, execution, startedAtMs });
   const waitingLabel = runnerWaitingLabel({ runId, status, execution, preparationLabel, startedAtMs }, waitingToStart);
+  const activity = useLiveExecutionActivity(runId ? execution : null, status);
   const yielded = turnItems.some(
     (item) =>
       item.kind === "protocol" &&
@@ -262,9 +285,12 @@ export function TaskChatRunnerTurn({
   const final = finalRef.current.item;
   const timelineItems = paperclipRunnerTimelineItems(turnItems);
   const currentActivityItems = currentActivityStatusItems(timelineItems);
+  // A reconnecting or stalled run is not streaming: its last reasoning or tool
+  // row must not keep animating "Thinking" while nothing arrives.
+  const streamingNow = !terminal && activity?.state !== "reconnecting" && activity?.state !== "suspected_stall";
   const timelineRows = groupImageResources(buildTurnTimelineRows(
     omitProgressRepeatedByResponse(timelineItems, final?.text),
-    !terminal,
+    streamingNow,
   ));
 
   return (
@@ -339,7 +365,8 @@ export function TaskChatRunnerTurn({
         </div>
       ) : null}
       {!final && currentActivityItems.length === 0 && !(status === "queued" && runId && (waitingLabel || agentQueueWaitFor({ status, execution })))
-        ? <RunnerCurrentActivityTail status={status} waitingLabel={waitingLabel} /> : null}
+        ? <RunnerCurrentActivityTail status={status} waitingLabel={waitingLabel}
+          activityLabel={activity?.label} activityState={activity?.state} /> : null}
     </div></ToolCallProgressRunProvider></TaskChatShimmerScope>
   );
 }

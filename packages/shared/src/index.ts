@@ -2869,6 +2869,15 @@ export type { ExecutionContinuationEnvelope } from "./types/execution-continuati
 export type { ExecutionAgentQueue, ExecutionProjection, ExecutionReconciliation, ExecutionBlocker, TaskInterruptionPresentation } from "./types/execution-projection.js";
 
 export { EXECUTION_RECONCILIATION_CAUSES, requiresExecutionReconciliation } from "./types/execution-projection.js";
+export type { ExecutionActivity, ExecutionActivityFacts, ExecutionActivityState } from "./execution-activity.js";
+export {
+  EXECUTION_ACTIVITY_NO_OUTPUT_MS,
+  EXECUTION_ACTIVITY_NO_PROGRESS_MS,
+  EXECUTION_ACTIVITY_RECONNECT_STALL_MS,
+  EXECUTION_ACTIVITY_STALL_MS,
+  classifyExecutionActivity,
+  formatActivityDuration,
+} from "./execution-activity.js";
 export * from "./types/voice-sessions.js";
 export * from "./validators/voice-sessions.js";
 

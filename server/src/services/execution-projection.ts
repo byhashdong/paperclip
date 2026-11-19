@@ -12,7 +12,7 @@ import {
   nativeRunFinalizations,
   type Db,
 } from "@paperclipai/db";
-import type { ExecutionProjection } from "@paperclipai/shared";
+import { classifyExecutionActivity, type ExecutionProjection } from "@paperclipai/shared";
 import { EXECUTION_CONTROL_DEADLINE_MS } from "./execution-control-deadline.js";
 import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
@@ -23,6 +23,7 @@ import { hasPendingRunCleanup } from "./execution-blocker.js";
 import { isAgentAwaitingSetup } from "../modules/agent-lifecycle/index.js";
 import { NATIVE_RESPONSE_WAKE_WAITING_REASON } from "./native-runtime/status-arbiter.js";
 import { agentQueueLinesForRuns } from "./heartbeat/queued-run-line.js";
+import { activityFactsFromProcessOutput, readExecutionActivityFacts } from "./execution-activity-facts.js";
 const MAX_PREDECESSOR_CLEANUP_CHECKS = 16;
 const ANOTHER_ROUTINE_TASK = "another task in this routine";
 const text = (v: unknown) => (typeof v === "string" ? v : null);
@@ -289,6 +290,8 @@ export async function executionProjectionsForRuns(
     const decisionId = coordinatorByRun.get(run.id)?.decisionId;
     return Boolean(issue && decisionId && issue.status === "in_progress" && issue.lastStatusDecisionId === decisionId);
   };
+  // Provider activity for running runs: one bounded read for the batch.
+  const activityFacts = await readExecutionActivityFacts(db, companyId, runs, read);
   for (const run of runs) {
     const issueId = run.nativeIssueId ?? text(run.contextSnapshot?.issueId);
     const matching = recovery.filter(
@@ -315,6 +318,13 @@ export async function executionProjectionsForRuns(
         run.status === "queued" && !run.startedAt ? routineHolderByIssue.get(issueIdOf(run) ?? "") : undefined,
       ),
     );
+    const projection = projections.get(run.id)!;
+    projection.activity = classifyExecutionActivity(projection,
+      activityFacts.get(run.id) ?? activityFactsFromProcessOutput(run), now);
+    // The confirmed activity time follows the same provider evidence everywhere.
+    if (projection.activity?.source === "provider_events" && projection.activity.lastConfirmedActivityAt) {
+      projection.lastConfirmedActivityAt = projection.activity.lastConfirmedActivityAt;
+    }
   }
   return projections;
 }
