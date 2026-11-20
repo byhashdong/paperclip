@@ -184,9 +184,6 @@ const support = external ? { supported: true } : await getEmbeddedPostgresTestSu
       credentialSecretRefs: [{ secretId: work.secretId, configPath: "credentials.authorization", versionSelector: "latest" }],
     }).where(eq(connectionGrants.id, work.id));
     vault.values.set(work.definitionId, "Bearer github_pat_work");
-    // GitHub cannot say who owns this token, so no author identity is imposed.
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("Bad credentials", { status: 401 })));
-    clearPersonalTokenOwnerCache();
     try {
       const result = await credentials(input, "sentinan");
       expect(result).toMatchObject({ status: "available", connectionId: work.connectionId });
@@ -194,7 +191,6 @@ const support = external ? { supported: true } : await getEmbeddedPostgresTestSu
       expect(result.env.GIT_AUTHOR_NAME).toBeUndefined();
       expect((await credentials(input, "byhashdong")).login).toBe("byhashdong");
     } finally {
-      vi.unstubAllGlobals();
       vault.values.delete(work.definitionId);
     }
   });
@@ -217,16 +213,10 @@ const support = external ? { supported: true } : await getEmbeddedPostgresTestSu
       "Bearer github_pat_personal": ["byhashdong/paperclip"],
       "Bearer github_pat_work": ["sentinan/ecg-reporting", "sentinan/app_redirect_page"],
     };
-    // GitHub names the account each token belongs to.
-    const owners: Record<string, { id: number; login: string }> = {
-      "Bearer github_pat_personal": { id: 88993803, login: "byhashdong" },
-      "Bearer github_pat_work": { id: 4242, login: "sentinan-dev" },
-    };
-    const github = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+    const github = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       const authorization = new Headers(init?.headers).get("authorization") ?? "";
       const names = reachable[authorization];
       if (!names) return new Response("Bad credentials", { status: 401 });
-      if (String(url) === "https://api.github.com/user") return Response.json(owners[authorization]);
       return Response.json(names.map((full_name, index) => ({ id: index + 1, full_name, private: true })));
     });
     vi.stubGlobal("fetch", github);
@@ -243,12 +233,6 @@ const support = external ? { supported: true } : await getEmbeddedPostgresTestSu
       const forPersonal = await credentials(input, "byhashdong");
       expect(forPersonal).toMatchObject({ status: "available", connectionId: personal.connectionId });
       expect(forPersonal.env.GH_TOKEN).toBe("github_pat_personal");
-      // A token connection has no stored account, so its commits name the token's owner.
-      expect(forPersonal.login).toBe("byhashdong");
-      expect(forPersonal.env.GIT_AUTHOR_NAME).toBe("byhashdong");
-      expect(forPersonal.env.GIT_AUTHOR_EMAIL).toBe("88993803+byhashdong@users.noreply.github.com");
-      expect(forPersonal.env.GIT_COMMITTER_EMAIL).toBe("88993803+byhashdong@users.noreply.github.com");
-      expect(forWork.env.GIT_AUTHOR_EMAIL).toBe("4242+sentinan-dev@users.noreply.github.com");
       // Neither token reaches this owner: refused, never borrowed.
       const unknown = await credentials(input, "octocat");
       expect(unknown.status).toBe("unavailable");
@@ -256,9 +240,7 @@ const support = external ? { supported: true } : await getEmbeddedPostgresTestSu
       expect(unknown.env).toEqual({});
       // Each token is asked once; later operations reuse what it reaches.
       const lookups = github.mock.calls.length;
-      // One repository lookup and one account lookup per token.
-      expect(github.mock.calls.filter(([url]) => String(url) !== "https://api.github.com/user")).toHaveLength(2);
-      expect(lookups).toBe(4);
+      expect(lookups).toBe(2);
       await credentials(input, "sentinan");
       expect(github.mock.calls.length).toBe(lookups);
 

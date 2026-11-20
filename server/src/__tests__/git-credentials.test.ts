@@ -4,7 +4,6 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { Db } from "@paperclipai/db";
-import { setHostGitIdentityReaderForTests } from "@paperclipai/adapter-utils/git-commit-identity";
 import {
   DEFAULT_GITHUB_TOKEN_SECRET_NAMES,
   GIT_CREDENTIAL_TOKEN_ENV_KEY,
@@ -234,48 +233,20 @@ describe("buildGitAuthInvocation", () => {
     expect(invocation.env).not.toHaveProperty("HOME");
   });
 
-  it("sets GitHub's stable noreply commit identity without exposing the token in config", () => {
+  it("imposes no commit identity, so the repository's and operator's identities apply", () => {
     const invocation = buildGitAuthInvocation({
       token: "super-secret-token",
       source: "managed_connection",
       secretName: null,
       githubIdentity: { userId: "12345", login: "octocat" },
     });
-    expect(invocation.env.GIT_CONFIG_KEY_7).toBe("user.name");
-    expect(invocation.env.GIT_CONFIG_VALUE_7).toBe("octocat");
-    expect(invocation.env.GIT_CONFIG_KEY_8).toBe("user.email");
-    expect(invocation.env.GIT_CONFIG_VALUE_8).toBe("12345+octocat@users.noreply.github.com");
-    expect(invocation.env.GIT_AUTHOR_NAME).toBe("octocat");
-    expect(invocation.env.GIT_AUTHOR_EMAIL).toBe("12345+octocat@users.noreply.github.com");
-    expect(invocation.env.GIT_COMMITTER_NAME).toBe("octocat");
-    expect(invocation.env.GIT_COMMITTER_EMAIL).toBe("12345+octocat@users.noreply.github.com");
-    expect(Object.values(invocation.env).filter((value) => value.includes("super-secret-token"))).toHaveLength(3);
-  });
-
-  it("names the operator's configured or host identity before the connected account", () => {
-    const credential = {
-      token: "t", source: "managed_connection" as const, secretName: null,
-      githubIdentity: { userId: "12345", login: "octocat" },
-    };
-    const author = () => {
-      const env = buildGitAuthInvocation(credential).env;
-      return `${env.GIT_AUTHOR_NAME} <${env.GIT_AUTHOR_EMAIL}>|${env.GIT_COMMITTER_NAME} <${env.GIT_COMMITTER_EMAIL}>`;
-    };
-    const restore = setHostGitIdentityReaderForTests(() => ({ name: "Host Dev", email: "host@example.test", source: "host_git_config" }));
-    try {
-      expect(author()).toBe("Host Dev <host@example.test>|Host Dev <host@example.test>");
-      vi.stubEnv("PAPERCLIP_GIT_COMMIT_NAME", "byhashdong");
-      vi.stubEnv("PAPERCLIP_GIT_COMMIT_EMAIL", "88993803+byhashdong@users.noreply.github.com");
-      expect(author()).toBe("byhashdong <88993803+byhashdong@users.noreply.github.com>|byhashdong <88993803+byhashdong@users.noreply.github.com>");
-      // An explicit identity applies even without a connected account.
-      expect(buildGitAuthInvocation({ token: "t", source: "company_secret", secretName: "GH_TOKEN" }).env.GIT_AUTHOR_NAME).toBe("byhashdong");
-    } finally {
-      vi.unstubAllEnvs();
-      restore();
+    for (const key of ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"]) {
+      expect(invocation.env).not.toHaveProperty(key);
     }
-    expect(author()).toBe("octocat <12345+octocat@users.noreply.github.com>|octocat <12345+octocat@users.noreply.github.com>");
-    // Nothing known: no identity is imposed, so the repository's own setting applies.
-    expect(buildGitAuthInvocation({ token: "t", source: "company_secret", secretName: "GH_TOKEN" }).env).not.toHaveProperty("GIT_AUTHOR_NAME");
+    const configKeys = Object.entries(invocation.env).filter(([key]) => /^GIT_CONFIG_KEY_\d+$/.test(key)).map(([, value]) => value);
+    expect(configKeys).toHaveLength(Number(invocation.env.GIT_CONFIG_COUNT));
+    expect(configKeys.filter((key) => key.startsWith("user."))).toEqual([]);
+    expect(Object.values(invocation.env).filter((value) => value.includes("super-secret-token"))).toHaveLength(3);
   });
 });
 

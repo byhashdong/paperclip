@@ -1,46 +1,32 @@
 import { isAbsolute } from "node:path";
 import {
-  type GitCommitIdentity,
-  isPaperclipPlaceholderIdentity,
-  PAPERCLIP_FALLBACK_GIT_IDENTITY,
+  type GitIdentityConfig,
+  IDENTITY_FILE_PATTERN,
+  PAPERCLIP_FALLBACK_GIT_IDENTITY_CONFIG,
 } from "./git-commit-identity.js";
-
-function gitConfigQuoted(value: string): string {
-  if (/[\u0000-\u001f\u007f]/u.test(value)) throw new Error("Git identity must not contain control characters");
-  // Plain values are written as Git writes them; anything else is quoted so
-  // comment characters, quotes and backslashes stay part of the value.
-  if (/^[A-Za-z0-9._@+-](?:[A-Za-z0-9 ._@+-]*[A-Za-z0-9._@+-])?$/u.test(value)) return value;
-  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-}
-
-/**
- * The scratch gitconfig every GitHub operation runs with. It names the
- * operator's commit identity so commits made without a repository-level
- * identity are not attributed to Paperclip. A repository's own `user.*`
- * setting still wins over it, as with any global Git configuration.
- */
-export function githubLauncherGitConfig(identity: Pick<GitCommitIdentity, "name" | "email"> = PAPERCLIP_FALLBACK_GIT_IDENTITY): string {
-  return `[user]\n\tname = ${gitConfigQuoted(identity.name)}\n\temail = ${gitConfigQuoted(identity.email)}\n`;
-}
 
 /** Standalone source for local, SSH, and sandbox runtimes. No secrets in files. */
 export function githubLauncherSource(options: {
   brokerFile?: boolean;
   interpreterPath?: string;
-  /** The operator's commit identity, resolved by `resolveOperatorGitCommitIdentity`. */
-  commitIdentity?: GitCommitIdentity;
+  /**
+   * The scratch global Git configuration each operation runs with, from
+   * `operatorGitIdentityConfig`. It names the operator's commit identities
+   * (per repository, below the repository's own setting) and nothing else.
+   * Without it, only Paperclip's placeholder identity is configured.
+   */
+  identityConfig?: GitIdentityConfig;
 } = {}): string {
   if (options.interpreterPath !== undefined && (typeof options.interpreterPath !== "string"
     || !isAbsolute(options.interpreterPath) || /[\s\0]/u.test(options.interpreterPath))) {
     throw new Error("GitHub launcher interpreter must be an absolute path without whitespace");
   }
-  const identity = options.commitIdentity && !isPaperclipPlaceholderIdentity(options.commitIdentity)
-    ? options.commitIdentity : PAPERCLIP_FALLBACK_GIT_IDENTITY;
-  const gitConfig = JSON.stringify(githubLauncherGitConfig(identity));
-  // An explicitly configured identity outranks a repository's own setting and
-  // the connected account's, so it is also pinned through Git's author env.
-  const enforcedIdentity = identity.source === "explicit"
-    ? JSON.stringify({ name: identity.name, email: identity.email }) : "null";
+  const identityConfig = options.identityConfig ?? PAPERCLIP_FALLBACK_GIT_IDENTITY_CONFIG;
+  if (Object.keys(identityConfig.files).some((name) => !IDENTITY_FILE_PATTERN.test(name))) {
+    throw new Error("Invalid Git identity file name");
+  }
+  const gitConfig = JSON.stringify(identityConfig.gitconfig);
+  const identityFiles = JSON.stringify(identityConfig.files);
   return String.raw`#!${options.interpreterPath ?? "/usr/bin/env node"}
 const fs = require('node:fs');
 const path = require('node:path');
@@ -189,6 +175,9 @@ ${options.brokerFile ? String.raw`
     fs.chmodSync(configDirectory, 0o700);
     configReady = true;
     process.once('exit', () => { try { fs.rmSync(configDirectory, { recursive: true, force: true }); } catch {} });
+    // The commit identity configuration names its include files relative to
+    // itself, so Git resolves them inside this private directory.
+    for (const [name, body] of Object.entries(${identityFiles})) fs.writeFileSync(path.join(configDirectory, name), body, { mode: 0o600 });
     fs.writeFileSync(path.join(configDirectory, 'gitconfig'), ${gitConfig}, { mode: 0o600 });
     authorReady = true;
   } catch { diagnostic('configuration_directory_unavailable'); }
@@ -253,17 +242,14 @@ ${options.brokerFile ? String.raw`
       connected = result.status === 'available';
       if (result.status === 'available' && configReady) {
         for (const [key, value] of Object.entries(result.env || {})) {
-          if (/^(GH_TOKEN|GITHUB_TOKEN|PAPERCLIP_GIT_TOKEN|GIT_TERMINAL_PROMPT|GIT_AUTHOR_(NAME|EMAIL)|GIT_COMMITTER_(NAME|EMAIL)|GIT_CONFIG_COUNT|GIT_CONFIG_(KEY|VALUE)_\d+)$/.test(key) && typeof value === 'string') env[key] = value;
+          // Credentials only: the commit identity comes from the scratch
+          // configuration, so a repository's own setting still wins.
+          if (/^(GH_TOKEN|GITHUB_TOKEN|PAPERCLIP_GIT_TOKEN|GIT_TERMINAL_PROMPT|GIT_CONFIG_COUNT|GIT_CONFIG_(KEY|VALUE)_\d+)$/.test(key) && typeof value === 'string') env[key] = value;
         }
       }
       }
     } else if (askBroker) { diagnostic('capability_missing'); }
     } catch { diagnostic('broker_transport_unavailable'); }
-  }
-  const enforcedIdentity = ${enforcedIdentity};
-  if (enforcedIdentity) {
-    env.GIT_AUTHOR_NAME = enforcedIdentity.name; env.GIT_AUTHOR_EMAIL = enforcedIdentity.email;
-    env.GIT_COMMITTER_NAME = enforcedIdentity.name; env.GIT_COMMITTER_EMAIL = enforcedIdentity.email;
   }
   const connectorTool = connected ? connectorRepositoryTool(process.argv.slice(2)) : null;
   if (connectorTool) {

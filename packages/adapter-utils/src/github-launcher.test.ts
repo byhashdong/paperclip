@@ -334,10 +334,13 @@ process.stdout.write(JSON.stringify({identity, token:process.env.GH_TOKEN ?? nul
     await git("commit", "--allow-empty", "-m", "B");
     user = "A";
     await git("commit", "--allow-empty", "-m", "A again");
-    expect(await git("log", "--format=%an <%ae>|%cn <%ce>" )).toBe("A <A@example.test>|A <A@example.test>\nB <B@example.test>|B <B@example.test>\nA <A@example.test>|A <A@example.test>");
+    // Credentials switch with the account, but an identity the broker sends is
+    // ignored: the repository's own user.name/user.email names the author.
+    const local = "Repository Author <repository@example.test>|Repository Author <repository@example.test>";
+    expect(await git("log", "--format=%an <%ae>|%cn <%ce>" )).toBe([local, local, local].join("\n"));
     const before = captures;
     const gh = JSON.parse((await exec(path.join(bin, "gh"), [], { cwd: repo, env })).stdout);
-    expect(gh.identity).toContain("A <A@example.test>");
+    expect(gh.identity).toContain("Repository Author <repository@example.test>");
     expect(gh.token).toBe("credential-A");
     expect(captures - before).toBe(1); // gh's child Git retains the same capture.
     const captured = new Promise<void>(resolve => { heldCapture = resolve; });
@@ -460,9 +463,11 @@ process.stdout.write(JSON.stringify({identity, token:process.env.GH_TOKEN ?? nul
       ["-C", "repo", "--unknown-option", "status"],
       ["-C"],
     ]) expect((await git(...args)).posts, args.join(" ")).toBe(1);
-    expect((await git("-C", "repo", "var", "GIT_AUTHOR_IDENT")).stdout).toMatch(/^Managed <managed@example.test>/);
+    // The broker supplies credentials only; an identity it sends is ignored and
+    // the scratch configuration (here only Paperclip's placeholder) names the author.
+    expect((await git("-C", "repo", "var", "GIT_AUTHOR_IDENT")).stdout).toMatch(/^Paperclip <noreply@paperclip.ing>/);
     expect((await git("-C", "repo", "commit", "--allow-empty", "-m", "Managed work")).posts).toBe(1);
-    expect((await git("-C", "repo", "log", "-1", "--format=%an <%ae>")).stdout).toBe("Managed <managed@example.test>");
+    expect((await git("-C", "repo", "log", "-1", "--format=%an <%ae>")).stdout).toBe("Paperclip <noreply@paperclip.ing>");
   }, 20_000);
 });
 

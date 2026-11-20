@@ -153,9 +153,8 @@ const support = external ? { supported: true } : await getEmbeddedPostgresTestSu
           source: "personal",
         });
         expect(result.env.GH_TOKEN).toBe(`test-token-${user}`);
-        expect(result.env.GIT_AUTHOR_EMAIL).toBe(
-          `${user}+${user}@users.noreply.github.com`,
-        );
+        // Credentials only: commits keep the repository's or operator's identity.
+        expect(result.env).not.toHaveProperty("GIT_AUTHOR_EMAIL");
       }
       const history = await db
         .select()

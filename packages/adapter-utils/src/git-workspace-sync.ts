@@ -7,7 +7,8 @@ import { createWorkspaceManifest, workspacePaths, WorkspaceNulParser, type Works
 import { runWorkspaceGitProcess } from "./workspace-git-stream.js";
 import {
   gitCommitIdentityConfigArgs,
-  resolveOperatorGitCommitIdentity,
+  PAPERCLIP_FALLBACK_GIT_IDENTITY,
+  resolveRepositoryGitCommitIdentity,
 } from "./git-commit-identity.js";
 import { preserveWorkspaceRestoreErrorDiagnostic, withWorkspaceRestoreGitCommand, type WorkspaceRestoreGitCommand } from "./workspace-restore-diagnostics.js";
 
@@ -82,16 +83,17 @@ export const GIT_ARCHIVE_EXCLUDES = [".git", ".git/*"] as const;
 /**
  * Identity flags for commits the sync machinery itself creates (the merge
  * commits that reconcile concurrent histories). These commits land in the
- * operator's history, so they carry the operator's developer identity: the
- * explicit Paperclip setting, else the repository's or host's Git identity
- * (see `git-commit-identity.ts`). Execution hosts are often containers with no
+ * operator's history, so they carry the identity Git would use for the
+ * repository: its own setting, else the operator's identity map, the host's
+ * Git configuration (with its includeIf rules), the default identity (see
+ * `git-commit-identity.ts`). Execution hosts are often containers with no
  * git config, where `commit-tree` would hard-fail with "Author identity
  * unknown" and fail the run at finalize, so Paperclip's placeholder is passed
- * only when no identity is available at all. `GIT_AUTHOR_*` / `GIT_COMMITTER_*`
- * environment variables still take precedence over `-c`.
+ * only when no identity is available at all. `GIT_AUTHOR_*` /
+ * `GIT_COMMITTER_*` environment variables still take precedence over `-c`.
  */
 export function gitSyncCommitIdentityArgs(repositoryDir?: string | null): string[] {
-  return gitCommitIdentityConfigArgs(resolveOperatorGitCommitIdentity({ repositoryDir }));
+  return gitCommitIdentityConfigArgs(repositoryDir ? resolveRepositoryGitCommitIdentity(repositoryDir) : PAPERCLIP_FALLBACK_GIT_IDENTITY);
 }
 
 function shellQuote(value: string) {

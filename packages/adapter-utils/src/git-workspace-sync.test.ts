@@ -30,6 +30,10 @@ import {
   setExpensiveWorkspaceGitExecutor,
   withShallowGitWorkspaceClone,
 } from "./git-workspace-sync.js";
+import { setHostGitConfigFilesForTests } from "./git-commit-identity.js";
+
+// Commit identities must not depend on the developer's own Git configuration.
+setHostGitConfigFilesForTests({ files: [] });
 
 const execFile = promisify(execFileCallback);
 

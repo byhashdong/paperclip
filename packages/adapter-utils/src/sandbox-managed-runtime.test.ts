@@ -45,6 +45,10 @@ import {
   type StartupTracer,
 } from "./acpx-engine/startup-timing.js";
 import type { RunProcessResult } from "./server-utils.js";
+import { setHostGitConfigFilesForTests } from "./git-commit-identity.js";
+
+// Commit identities must not depend on the developer's own Git configuration.
+setHostGitConfigFilesForTests({ files: [] });
 
 function toArrayBuffer(bytes: Buffer): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;

@@ -16,6 +16,10 @@ import {
   prepareGitHubExecutionEnvironment,
   runAdapterExecutionTargetProcess,
 } from "./execution-target.js";
+import { setHostGitConfigFilesForTests } from "./git-commit-identity.js";
+
+// Commit identities must not depend on the developer's own Git configuration.
+setHostGitConfigFilesForTests({ files: [] });
 
 const exec = promisify(execFile);
 const roots: string[] = [];

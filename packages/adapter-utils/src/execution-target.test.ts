@@ -18,6 +18,10 @@ import {
   runAdapterExecutionTargetShellCommand,
   type AdapterSshExecutionTarget,
 } from "./execution-target.js";
+import { setHostGitConfigFilesForTests } from "./git-commit-identity.js";
+
+// Commit identities must not depend on the developer's own Git configuration.
+setHostGitConfigFilesForTests({ files: [] });
 
 function sshExecutionTarget(): AdapterSshExecutionTarget {
   return {
