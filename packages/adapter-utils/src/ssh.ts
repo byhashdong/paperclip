@@ -8,7 +8,7 @@ import { pipeline, Transform } from "node:stream";
 import type { CommandManagedRuntimeRunner } from "./command-managed-runtime.js";
 import {
   createUnrelatedHistoryGraftCommit,
-  GIT_SYNC_COMMIT_IDENTITY_ARGS,
+  gitSyncCommitIdentityArgs,
   listProjectRepositoryStagingPaths,
   PROJECT_REPOSITORIES_DIR,
   PROJECT_REPOSITORY_STAGING_PATTERN,
@@ -1048,7 +1048,7 @@ async function integrateImportedGitHead(input: {
     const mergeCommit = await runLocalGit(
       input.localDir,
       [
-        ...GIT_SYNC_COMMIT_IDENTITY_ARGS,
+        ...gitSyncCommitIdentityArgs(input.localDir),
         "commit-tree",
         mergedTreeId,
         "-p",

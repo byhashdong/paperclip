@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
 import { githubLauncherSource } from "./github-launcher.js";
+import { resolveOperatorGitCommitIdentity } from "./git-commit-identity.js";
 import { ACP_PROCESS_TERMINAL_SIGNALS, type ACP_PROCESS_TERMINAL_SOURCES } from "./acpx-engine/constants.js";
 import type { SshRemoteExecutionSpec } from "./ssh.js";
 import {
@@ -1851,7 +1852,8 @@ export async function prepareGitHubOperationLaunchers(input: {
     // Remote launchers live beneath the checkout. Pin their own package scope
     // so an enclosing project's "type": "module" cannot reinterpret require().
     ["package.json", '{"type":"commonjs"}\n'],
-    ...["git", "gh"].map((name) => [name, githubLauncherSource()] as const),
+    // Commits made through these launchers carry the operator's identity, not Paperclip's.
+    ...["git", "gh"].map((name) => [name, githubLauncherSource({ commitIdentity: resolveOperatorGitCommitIdentity() })] as const),
     ...[".zshenv", ".zprofile", ".zshrc", ".bash_profile", ".bashrc", ".profile"].map((name) => [name, profile] as const),
   ]);
   if (remote) {

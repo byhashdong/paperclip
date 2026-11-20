@@ -442,6 +442,10 @@ export async function prepareAcpxRuntimeSandbox(input: {
         model: input.binding.requestedModel,
         availableModels: [input.binding.requestedModel],
         ...(input.binding.claudeEffort ? { effortLevel: input.binding.claudeEffort } : {}),
+        // Commits and pull requests belong to the operator's developer
+        // identity, so Claude adds no Co-Authored-By trailer or footer.
+        attribution: { commit: "", pr: "" },
+        includeCoAuthoredBy: false,
         permissions: {
           ...((input.binding.permissionMode === "approve-reads" || input.binding.permissionMode === "approve-paperclip")
             ? { allow: claudePaperclipPermissionRules(input.tools ?? [], input.binding.permissionMode) }

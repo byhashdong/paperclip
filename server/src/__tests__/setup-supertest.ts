@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { setHostGitIdentityReaderForTests } from "@paperclipai/adapter-utils/git-commit-identity";
 import { createIsolatedTestHome } from "./helpers/isolated-test-home.js";
 import { beforeEach } from "vitest";
 import { createRequire } from "node:module";
@@ -26,6 +27,12 @@ type SupertestTestConstructor = {
 
 // Keep the original home available only for read-only host port-lease checks.
 process.env.PAPERCLIP_TEST_HOST_HOME ??= process.env.PAPERCLIP_HOME?.trim() || path.join(os.homedir(), ".paperclip");
+
+// Commit identities must not depend on the developer's own Git configuration.
+// Tests that cover the identity order install their own host reader.
+delete process.env.PAPERCLIP_GIT_COMMIT_NAME;
+delete process.env.PAPERCLIP_GIT_COMMIT_EMAIL;
+setHostGitIdentityReaderForTests(() => null);
 
 // Receipt-spool recovery must never scan a developer's instance during tests.
 const { home: paperclipTestHome, cleanup: cleanupPaperclipTestHome } = createIsolatedTestHome();

@@ -11,6 +11,8 @@ import {
   type Db,
 } from "@paperclipai/db";
 import { and, eq, inArray, or, sql } from "drizzle-orm";
+import { createHash } from "node:crypto";
+import { resolveOperatorGitCommitIdentity } from "@paperclipai/adapter-utils/git-commit-identity";
 import { isGitHubDotCom } from "./github-fetch.js";
 import { secretService } from "./secrets.js";
 import { toolAccessService } from "./tool-access.js";
@@ -122,8 +124,11 @@ export function scrubGitCredentialText(text: string): string {
 }
 
 export function buildGitAuthInvocation(credential: GitCredential): GitAuthInvocation {
-  const identity = credential.githubIdentity;
-  const noreplyEmail = identity ? `${identity.userId}+${identity.login}@users.noreply.github.com` : null;
+  // Commits name the operator's developer identity: explicit configuration,
+  // then the host's Git identity, then the connected GitHub account. With none
+  // of them, no identity is imposed and the repository's own setting applies.
+  const resolved = resolveOperatorGitCommitIdentity({ github: credential.githubIdentity });
+  const identity = resolved.source === "paperclip_fallback" ? null : resolved;
   const configEntries = [
     ["credential.helper", ""],
     ["credential.https://github.com.helper", GIT_CREDENTIAL_HELPER],
@@ -133,8 +138,8 @@ export function buildGitAuthInvocation(credential: GitCredential): GitAuthInvoca
     ["url.https://github.com/.insteadOf", "git@www.github.com:"],
     ["url.https://github.com/.insteadOf", "ssh://git@www.github.com/"],
     ...(identity ? [
-      ["user.name", identity.login],
-      ["user.email", noreplyEmail!],
+      ["user.name", identity.name],
+      ["user.email", identity.email],
     ] : []),
   ];
   return {
@@ -154,10 +159,10 @@ export function buildGitAuthInvocation(credential: GitCredential): GitAuthInvoca
       GITHUB_TOKEN: credential.token,
       GIT_TERMINAL_PROMPT: "0",
       ...(identity ? {
-        GIT_AUTHOR_NAME: identity.login,
-        GIT_AUTHOR_EMAIL: noreplyEmail!,
-        GIT_COMMITTER_NAME: identity.login,
-        GIT_COMMITTER_EMAIL: noreplyEmail!,
+        GIT_AUTHOR_NAME: identity.name,
+        GIT_AUTHOR_EMAIL: identity.email,
+        GIT_COMMITTER_NAME: identity.name,
+        GIT_COMMITTER_EMAIL: identity.email,
       } : {}),
       GIT_CONFIG_COUNT: String(configEntries.length),
       ...Object.fromEntries(configEntries.flatMap(([key, value], index) => [
@@ -440,10 +445,51 @@ async function resolveGitHubGrantToken(
 const PERSONAL_TOKEN_OWNERS_TTL_MS = 10 * 60_000;
 const PERSONAL_TOKEN_OWNERS_RETRY_MS = 60_000;
 const personalTokenOwnerCache = new Map<string, { owners: string[]; expiresAt: number }>();
+const PERSONAL_TOKEN_IDENTITY_TTL_MS = 60 * 60_000;
+const PERSONAL_TOKEN_IDENTITY_RETRY_MS = 60_000;
+const personalTokenIdentityCache = new Map<string, { identity: { userId: string; login: string } | null; expiresAt: number }>();
+
+/**
+ * A personal access token connection has no stored GitHub account, so its
+ * commits would otherwise carry no author identity. Ask GitHub who owns the
+ * token (only the account's id and login are kept). Results are keyed by a
+ * hash of the token, never the token itself; a failed lookup is retried after
+ * a minute and meanwhile leaves the identity unknown.
+ */
+async function detectPersonalTokenIdentity(token: string): Promise<{ userId: string; login: string } | null> {
+  const key = createHash("sha256").update(token).digest("hex");
+  const now = Date.now();
+  const cached = personalTokenIdentityCache.get(key);
+  if (cached && cached.expiresAt > now) return cached.identity;
+  let identity: { userId: string; login: string } | null = null;
+  let ttl = PERSONAL_TOKEN_IDENTITY_RETRY_MS;
+  try {
+    const response = await fetch("https://api.github.com/user", {
+      redirect: "error",
+      signal: AbortSignal.timeout(5_000),
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
+    });
+    if (response.ok) {
+      const body = await response.json() as { id?: unknown; login?: unknown; type?: unknown };
+      const userId = typeof body.id === "number" && Number.isSafeInteger(body.id) ? String(body.id) : null;
+      const login = typeof body.login === "string" && /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$/.test(body.login) ? body.login : null;
+      if (userId && login) identity = { userId, login };
+      ttl = PERSONAL_TOKEN_IDENTITY_TTL_MS;
+    } else {
+      await response.arrayBuffer().catch(() => undefined);
+    }
+  } catch {
+    // Provider errors can carry secrets; the identity simply stays unknown.
+  }
+  for (const [entryKey, entry] of personalTokenIdentityCache) if (entry.expiresAt <= now) personalTokenIdentityCache.delete(entryKey);
+  personalTokenIdentityCache.set(key, { identity, expiresAt: now + ttl });
+  return identity;
+}
 
 /** For tests: forget detected personal access token owners. */
 export function clearPersonalTokenOwnerCache() {
   personalTokenOwnerCache.clear();
+  personalTokenIdentityCache.clear();
 }
 
 /**
@@ -791,13 +837,16 @@ export async function resolveManagedGitHubCredential(
     });
     if ("error" in resolvedToken) return { configured: true, identitySource: selection.identitySource, error: resolvedToken.error };
     const token = resolvedToken.token;
+    const githubIdentity = github?.userId && github.login
+      ? { userId: github.userId, login: github.login }
+      : personalAccessToken ? await detectPersonalTokenIdentity(token) : null;
     return {
       configured: true, identitySource: selection.identitySource,
       credential: {
         token,
         source: "managed_connection" as const,
         secretName: null,
-        ...(github?.userId && github.login ? { githubIdentity: { userId: github.userId, login: github.login } } : {}),
+        ...(githubIdentity ? { githubIdentity } : {}),
         identitySource: grant.kind === "agent" ? "dedicated" as const : "personal" as const,
         connectionId: grant.connectionId,
         grantId: grant.id,

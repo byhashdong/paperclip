@@ -5,6 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import { createWorkspaceManifest, workspacePaths, WorkspaceNulParser, type WorkspacePaths } from "./workspace-manifest.js";
 import { runWorkspaceGitProcess } from "./workspace-git-stream.js";
+import {
+  gitCommitIdentityConfigArgs,
+  resolveOperatorGitCommitIdentity,
+} from "./git-commit-identity.js";
 import { preserveWorkspaceRestoreErrorDiagnostic, withWorkspaceRestoreGitCommand, type WorkspaceRestoreGitCommand } from "./workspace-restore-diagnostics.js";
 
 export interface GitCommandResult {
@@ -77,20 +81,18 @@ export const GIT_ARCHIVE_EXCLUDES = [".git", ".git/*"] as const;
 
 /**
  * Identity flags for commits the sync machinery itself creates (the merge
- * commits that reconcile concurrent histories). Execution hosts are often
- * containers with no git config and no resolvable hostname, so git cannot
- * auto-detect an identity there and `commit-tree` hard-fails with "Author
- * identity unknown" — which fails the whole run at finalize. Passing the
- * identity per invocation keeps every deployment working without host
- * configuration; `GIT_AUTHOR_*` / `GIT_COMMITTER_*` environment variables
- * still take precedence over `-c` when an operator sets them.
+ * commits that reconcile concurrent histories). These commits land in the
+ * operator's history, so they carry the operator's developer identity: the
+ * explicit Paperclip setting, else the repository's or host's Git identity
+ * (see `git-commit-identity.ts`). Execution hosts are often containers with no
+ * git config, where `commit-tree` would hard-fail with "Author identity
+ * unknown" and fail the run at finalize, so Paperclip's placeholder is passed
+ * only when no identity is available at all. `GIT_AUTHOR_*` / `GIT_COMMITTER_*`
+ * environment variables still take precedence over `-c`.
  */
-export const GIT_SYNC_COMMIT_IDENTITY_ARGS = [
-  "-c",
-  "user.name=Paperclip",
-  "-c",
-  "user.email=noreply@paperclip.ing",
-] as const;
+export function gitSyncCommitIdentityArgs(repositoryDir?: string | null): string[] {
+  return gitCommitIdentityConfigArgs(resolveOperatorGitCommitIdentity({ repositoryDir }));
+}
 
 function shellQuote(value: string) {
   return `'${value.replace(/'/g, `'\"'\"'`)}'`;
@@ -992,7 +994,7 @@ export async function createUnrelatedHistoryGraftCommit(input: {
   ].join("\n");
   const graftCommit = await runIntegrationGit(
     "commit_tree", input.localDir,
-    [...GIT_SYNC_COMMIT_IDENTITY_ARGS, "commit-tree", importedTree, "-p", input.currentHead, "-m", message],
+    [...gitSyncCommitIdentityArgs(input.localDir), "commit-tree", importedTree, "-p", input.currentHead, "-m", message],
     {
       timeout: 60_000,
       maxBuffer: 64 * 1024,
@@ -1163,7 +1165,7 @@ export async function integrateImportedGitHead(input: {
     const mergeCommit = await runIntegrationGit(
       "commit_tree", input.localDir,
       [
-        ...GIT_SYNC_COMMIT_IDENTITY_ARGS,
+        ...gitSyncCommitIdentityArgs(input.localDir),
         "commit-tree",
         mergedTreeId,
         "-p",

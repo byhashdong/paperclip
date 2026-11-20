@@ -195,6 +195,9 @@ describe("ACPX runtime sandbox", () => {
       expect(JSON.parse(await readFile(settingsPath, "utf8"))).toMatchObject({
         model,
         availableModels: [model],
+        // No agent attribution in commits or pull requests.
+        attribution: { commit: "", pr: "" },
+        includeCoAuthoredBy: false,
       });
       expect((await stat(settingsPath)).mode & 0o777).toBe(0o600);
     },
