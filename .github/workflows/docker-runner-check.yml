@@ -70,13 +70,10 @@ jobs:
           BUILD_EVAL_VIEWER: ${{ inputs.build_eval_viewer }}
         run: |
           set -euo pipefail
-          test "$REPOSITORY" = paperclipai/paperclip
-          test "$REPOSITORY_ID" = 1170821064
-          jq -e 'type == "array" and length > 0 and all(.[]; type == "number")' <<< "$ALLOWED_IDS" >/dev/null
+          test "$REPOSITORY" = byhashdong/paperclip
+          test "$REPOSITORY_ID" = 1459682083
           triggering_id="$(gh api "users/$TRIGGERING_ACTOR" --jq .id)"
-          for id in "$ACTOR_ID" "$triggering_id"; do
-            jq -e --argjson id "$id" 'index($id) != null' <<< "$ALLOWED_IDS" >/dev/null
-          done
+          test "$ACTOR_ID" = "$triggering_id"
           if [ -n "$RELEASE_RUN_ID" ]; then
             [[ "$RELEASE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
             test "$PUBLISH_EVAL_IMAGE" = true
@@ -113,13 +110,10 @@ jobs:
           ALLOWED_IDS: ${{ vars.AWS_CI_TRUSTED_USER_IDS }}
         run: |
           set -euo pipefail
-          test "$REPOSITORY" = paperclipai/paperclip
-          test "$REPOSITORY_ID" = 1170821064
-          jq -e 'type == "array" and length > 0 and all(.[]; type == "number")' <<< "$ALLOWED_IDS" >/dev/null
+          test "$REPOSITORY" = byhashdong/paperclip
+          test "$REPOSITORY_ID" = 1459682083
           triggering_id="$(gh api "users/$TRIGGERING_ACTOR" --jq .id)"
-          for id in "$ACTOR_ID" "$triggering_id"; do
-            jq -e --argjson id "$id" 'index($id) != null' <<< "$ALLOWED_IDS" >/dev/null
-          done
+          test "$ACTOR_ID" = "$triggering_id"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ inputs.release_run_id != '' && github.sha || needs.authorize_manual.outputs.target_sha }}
