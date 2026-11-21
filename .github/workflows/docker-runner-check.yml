@@ -238,17 +238,19 @@ jobs:
           set -uo pipefail
           pnpm install --frozen-lockfile --ignore-scripts
           status=0
-          for check in \
-            'pnpm exec tsc --noEmit -p server/tsconfig.json --pretty false' \
-            'pnpm exec vitest run server/src/services/native-runtime/native-runner-file-handoff.test.ts server/src/services/native-runtime/chat-attachment-read.test.ts server/src/services/native-runtime/native-runner-attachment-staging.test.ts server/src/services/native-runtime/native-staged-attachment-recovery.test.ts server/src/services/native-runtime/remote-attachment-staging.test.ts server/src/services/native-runtime/runner-task-attachments.test.ts'; do
-            label="$(echo "$check" | tr -cs 'a-zA-Z0-9' '-')"
+          run_check() {
+            label="$1"
+            check="$2"
             echo "Starting $check"
             check_status=0
             timeout --signal=TERM --kill-after=15s 20m bash -c "$check" > "remote-verification/$label.log" 2>&1 || check_status=$?
             printf '%s\t%s\n' "$check_status" "$check" >> remote-verification/check-status.tsv
             if [ "$check_status" -ne 0 ]; then status=1; fi
             echo "Finished $check (exit $check_status)"
-          done
+          }
+          run_check prepare-server-dependencies 'pnpm --filter @paperclipai/paperclip-runner run build:typescript && pnpm --filter @paperclipai/plugin-sdk run ensure-build-deps'
+          run_check server-typecheck 'pnpm exec tsc --noEmit -p server/tsconfig.json --pretty false'
+          run_check attachment-tests 'pnpm exec vitest run server/src/services/native-runtime/native-runner-file-handoff.test.ts server/src/services/native-runtime/chat-attachment-read.test.ts server/src/services/native-runtime/native-runner-attachment-staging.test.ts server/src/services/native-runtime/native-staged-attachment-recovery.test.ts server/src/services/native-runtime/remote-attachment-staging.test.ts server/src/services/native-runtime/runner-task-attachments.test.ts'
           exit "$status"
       - name: Verify clean public npm installation
         if: inputs.verify_public_install && !inputs.verify_source
