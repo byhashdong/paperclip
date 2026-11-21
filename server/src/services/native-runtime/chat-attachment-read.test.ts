@@ -364,6 +364,7 @@ describe("native same-conversation historical attachment reading", () => {
         unlock();
         await holder;
       }
+      if (source.kind === "task") throw new Error("history fixture received a task attachment");
       const mismatched = createRunnerAttachmentGrant(binding, { ...source, sourceCommentId: randomUUID() }, "test-turn", grant.url, env);
       await request(app).get(RUNNER_ATTACHMENT_DOWNLOAD_PATH)
         .set("Authorization", `Bearer ${mismatched.token}`).expect(404);

@@ -14,7 +14,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 
-import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 
 import type { Db } from "@paperclipai/db";
 import {
@@ -102,14 +102,17 @@ export type NativeRunnerAttachmentStager = (input: { body: Buffer; contentType?:
   cleanup(): Promise<void>;
 }>;
 
-export type NativeRunnerAttachmentSource = {
+type NativeRunnerAttachmentIdentity = {
   attachmentId: string;
-  sourceCommentId: string;
-  kind: "wake" | "history";
   contentType: string;
   byteSize: number;
   sha256: string;
 };
+
+export type NativeRunnerAttachmentSource = NativeRunnerAttachmentIdentity & (
+  | { sourceCommentId: string; kind: "wake" | "history" }
+  | { kind: "task" }
+);
 
 export type NativeRunnerAttachmentDownload = (source: NativeRunnerAttachmentSource) => Promise<string | null>;
 
@@ -454,13 +457,14 @@ function record(value: unknown): Record<string, unknown> {
     : {};
 }
 
-function wakeAttachmentSelections(value: unknown): Array<{
-  readonly id: string;
-  readonly commentId: string;
-}> {
+type NativeRunnerAttachmentSelection =
+  | { readonly id: string; readonly kind: "wake"; readonly commentId: string }
+  | { readonly id: string; readonly kind: "task"; readonly commentId: null };
+
+function wakeAttachmentSelections(value: unknown): NativeRunnerAttachmentSelection[] {
   const wake = record(record(value).paperclipWake);
   const comments = Array.isArray(wake.comments) ? wake.comments : [];
-  const selected: Array<{ id: string; commentId: string }> = [];
+  const selected: NativeRunnerAttachmentSelection[] = [];
   const seen = new Set<string>();
   for (const candidate of comments) {
     const comment = record(candidate);
@@ -477,7 +481,7 @@ function wakeAttachmentSelections(value: unknown): Array<{
         continue;
       }
       seen.add(attachment.id);
-      selected.push({ id: attachment.id, commentId: comment.id });
+      selected.push({ id: attachment.id, kind: "wake", commentId: comment.id });
     }
   }
   return selected;
@@ -895,8 +899,47 @@ export async function resolveNativeRunnerWakeAttachmentSelections(input: {
 }
 
 /**
- * Materialize the exact attachments admitted into this run's server-built
- * wake snapshot. The provider receives only the staged path and metadata.
+ * Resolve every file admitted to this provider turn. Comment attachments stay
+ * wake-scoped, while commentless task attachments are durable task inputs and
+ * are admitted on every fresh or resumed run. Files produced by the current
+ * run are outputs, not inputs, and are excluded.
+ */
+export async function resolveNativeRunnerAttachmentSelections(input: {
+  db: Db;
+  binding: Pick<NativeRunnerFileHandoffBinding, "companyId" | "issueId" | "runId" | "agentId">;
+  requireRunning?: boolean;
+}): Promise<NativeRunnerAttachmentSelection[]> {
+  const wakeSelections = await resolveNativeRunnerWakeAttachmentSelections(input);
+  const taskAttachments = await input.db
+    .select({ id: issueAttachments.id })
+    .from(issueAttachments)
+    .where(and(
+      eq(issueAttachments.companyId, input.binding.companyId),
+      eq(issueAttachments.issueId, input.binding.issueId),
+      isNull(issueAttachments.issueCommentId),
+      or(
+        isNull(issueAttachments.originatingRunId),
+        ne(issueAttachments.originatingRunId, input.binding.runId),
+      ),
+    ))
+    .orderBy(asc(issueAttachments.createdAt), asc(issueAttachments.id))
+    .limit(MAX_NATIVE_STAGED_ATTACHMENTS + 1);
+  const seen = new Set(wakeSelections.map((selection) => selection.id));
+  const selections: NativeRunnerAttachmentSelection[] = [
+    ...wakeSelections,
+    ...taskAttachments
+      .filter((attachment) => !seen.has(attachment.id))
+      .map((attachment) => ({ id: attachment.id, kind: "task" as const, commentId: null })),
+  ];
+  if (selections.length > MAX_NATIVE_STAGED_ATTACHMENTS) {
+    throw new Error("paperclip_runner_attachment_staging_count_denied");
+  }
+  return selections;
+}
+
+/**
+ * Materialize exact current-wake attachments plus durable task-bound inputs.
+ * The provider receives only the staged path and metadata.
  */
 export async function stageNativeRunnerWakeAttachments(input: {
   readonly db: Db;
@@ -913,7 +956,7 @@ export async function stageNativeRunnerWakeAttachments(input: {
   readonly stageRemoteAttachment?: NativeRunnerAttachmentStager;
   readonly downloadRemoteAttachment?: NativeRunnerAttachmentDownload;
 }): Promise<NativeRunnerAttachmentStage> {
-  const selections = await resolveNativeRunnerWakeAttachmentSelections(input);
+  const selections = await resolveNativeRunnerAttachmentSelections(input);
   const workspaceRoot =
     input.binding.executionTargetKind === "local"
       ? await realpath(input.binding.workspaceRoot)
@@ -997,9 +1040,12 @@ export async function stageNativeRunnerWakeAttachments(input: {
   );
   const rowById = new Map(
     rows
-      .filter(
-        (row) => row.issueCommentId === selectionById.get(row.id)?.commentId,
-      )
+      .filter((row) => {
+        const selection = selectionById.get(row.id);
+        return selection?.kind === "task"
+          ? row.issueCommentId === null
+          : row.issueCommentId === selection?.commentId;
+      })
       .map((row) => [row.id, row] as const),
   );
   if (input.binding.executionTargetKind === "remote" && !input.stageRemoteAttachment && !input.downloadRemoteAttachment) {
@@ -1040,14 +1086,17 @@ export async function stageNativeRunnerWakeAttachments(input: {
         continue;
       }
       try {
-        const runnerLocalPath = await input.downloadRemoteAttachment?.({
-          kind: "wake",
+        const selection = selectionById.get(row.id)!;
+        const identity = {
           attachmentId: row.id,
-          sourceCommentId: selectionById.get(row.id)!.commentId,
           contentType: row.contentType,
           byteSize: row.byteSize,
           sha256: row.sha256,
-        });
+        };
+        const source: NativeRunnerAttachmentSource = selection.kind === "task"
+          ? { kind: "task", ...identity }
+          : { kind: "wake", sourceCommentId: selection.commentId, ...identity };
+        const runnerLocalPath = await input.downloadRemoteAttachment?.(source);
         if (runnerLocalPath) {
           staged.push({
             id: row.id, filename: row.filename?.trim() || "attachment",

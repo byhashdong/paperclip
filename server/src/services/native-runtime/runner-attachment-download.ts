@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router } from "express";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import { assets, heartbeatRuns, issueAttachments, type Db } from "@paperclipai/db";
 import { z } from "zod";
 import { MAX_ATTACHMENT_BYTES } from "../../attachment-types.js";
@@ -9,6 +9,7 @@ import { authorizeHistoricalRunnerAttachment } from "./chat-attachment-read.js";
 import type { ChatReuseBinding } from "./chat-attachment-reuse.js";
 import {
   readBoundedStorageObject,
+  resolveNativeRunnerAttachmentSelections,
   resolveNativeRunnerWakeAttachmentSelections,
   type NativeRunnerAttachmentSource,
 } from "./native-runner-file-handoff.js";
@@ -16,16 +17,20 @@ import {
 export const RUNNER_ATTACHMENT_DOWNLOAD_PATH = "/api/runtime/runner/attachment";
 const maxBytes = Math.min(MAX_ATTACHMENT_BYTES, 10 * 1024 * 1024);
 const ttlMs = 30_000;
-const claimsSchema = z.object({
+const claimsBaseSchema = z.object({
   companyId: z.uuid(), issueId: z.uuid(), runId: z.uuid(), agentId: z.uuid(),
-  attachmentId: z.uuid(), sourceCommentId: z.uuid(),
-  kind: z.enum(["wake", "history"]),
+  attachmentId: z.uuid(),
   turnId: z.string().min(1).max(160),
   contentType: z.string().min(1).max(128),
   byteSize: z.number().int().min(0).max(maxBytes),
   sha256: z.string().regex(/^[a-f0-9]{64}$/),
   expiresAt: z.number().int(),
 }).strict();
+const claimsSchema = z.discriminatedUnion("kind", [
+  claimsBaseSchema.extend({ kind: z.literal("wake"), sourceCommentId: z.uuid() }),
+  claimsBaseSchema.extend({ kind: z.literal("history"), sourceCommentId: z.uuid() }),
+  claimsBaseSchema.extend({ kind: z.literal("task") }),
+]);
 
 function signingSecret(env: NodeJS.ProcessEnv) {
   return env.PAPERCLIP_AGENT_JWT_SECRET?.trim() || env.BETTER_AUTH_SECRET?.trim();
@@ -95,15 +100,23 @@ async function authorizedSource(db: Db, claims: z.infer<typeof claimsSchema>) {
       attachmentId: claims.attachmentId, sourceCommentId: claims.sourceCommentId,
     });
   }
-  const wake = await resolveNativeRunnerWakeAttachmentSelections({ db, binding: claims, requireRunning: true });
-  if (!wake.some(({ id, commentId }) => id === claims.attachmentId && commentId === claims.sourceCommentId)) return null;
+  const selections = claims.kind === "task"
+    ? await resolveNativeRunnerAttachmentSelections({ db, binding: claims, requireRunning: true })
+    : await resolveNativeRunnerWakeAttachmentSelections({ db, binding: claims, requireRunning: true });
+  if (!selections.some((selection) => selection.id === claims.attachmentId
+    && (claims.kind === "task"
+      ? selection.kind === "task"
+      : selection.kind === "wake" && selection.commentId === claims.sourceCommentId))) return null;
   const [attachment] = await db.select({
     objectKey: assets.objectKey, contentType: assets.contentType, byteSize: assets.byteSize, sha256: assets.sha256,
   }).from(issueAttachments).innerJoin(assets, and(
     eq(assets.id, issueAttachments.assetId), eq(assets.companyId, claims.companyId),
   )).where(and(
     eq(issueAttachments.companyId, claims.companyId), eq(issueAttachments.issueId, claims.issueId),
-    eq(issueAttachments.id, claims.attachmentId), eq(issueAttachments.issueCommentId, claims.sourceCommentId),
+    eq(issueAttachments.id, claims.attachmentId),
+    claims.kind === "task"
+      ? isNull(issueAttachments.issueCommentId)
+      : eq(issueAttachments.issueCommentId, claims.sourceCommentId),
   )).limit(1);
   return attachment ?? null;
 }

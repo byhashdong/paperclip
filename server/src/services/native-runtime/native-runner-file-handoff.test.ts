@@ -240,6 +240,173 @@ describe("native runner file handoff", () => {
     }
   });
 
+  it("materializes one task-bound ZIP on initial admission and resume without sibling leakage", async () => {
+    const storage = createStorageService(
+      createLocalDiskStorageProvider(storageRoot),
+    );
+    const taskId = randomUUID();
+    const siblingTaskId = randomUUID();
+    const initialRunId = randomUUID();
+    const resumedRunId = randomUUID();
+    const zipBytes = Buffer.from(
+      "504b0506000000000000000000000000000000000000",
+      "hex",
+    );
+    const siblingBytes = Buffer.from("sibling task bytes must stay private");
+    const stored = await storage.putFile({
+      companyId,
+      namespace: `issues/${taskId}`,
+      originalFilename: "reader-input.zip",
+      contentType: "application/zip",
+      body: zipBytes,
+    });
+    const siblingStored = await storage.putFile({
+      companyId,
+      namespace: `issues/${siblingTaskId}`,
+      originalFilename: "sibling.zip",
+      contentType: "application/zip",
+      body: siblingBytes,
+    });
+    await db.insert(issues).values([
+      { id: taskId, companyId, title: "Isolated ZIP reader", status: "in_progress", assigneeAgentId: agentId },
+      { id: siblingTaskId, companyId, title: "Sibling reader", status: "todo", assigneeAgentId: agentId },
+    ]);
+    await db.insert(heartbeatRuns).values({
+      id: initialRunId, companyId, agentId, status: "running", runtimeMode: "native",
+      nativeIssueId: taskId, invocationSource: "assignment", triggerDetail: "system",
+      contextSnapshot: { issueId: taskId },
+    });
+    await db.update(issues).set({ executionRunId: initialRunId }).where(eq(issues.id, taskId));
+    const attachment = await issueService(db).createAttachment({
+      issueId: taskId,
+      provider: stored.provider,
+      objectKey: stored.objectKey,
+      contentType: stored.contentType,
+      byteSize: stored.byteSize,
+      sha256: stored.sha256,
+      originalFilename: stored.originalFilename,
+      createdByUserId: "input-owner",
+    });
+    const siblingAttachment = await issueService(db).createAttachment({
+      issueId: siblingTaskId,
+      provider: siblingStored.provider,
+      objectKey: siblingStored.objectKey,
+      contentType: siblingStored.contentType,
+      byteSize: siblingStored.byteSize,
+      sha256: siblingStored.sha256,
+      originalFilename: siblingStored.originalFilename,
+      createdByUserId: "input-owner",
+    });
+    await db.insert(issueWorkProducts).values([
+      { companyId, issueId: taskId, type: "artifact", provider: "paperclip", externalId: attachment.id,
+        title: "reader-input.zip", status: "active" },
+      { companyId, issueId: taskId, type: "artifact", provider: "paperclip", externalId: attachment.id,
+        title: "duplicate metadata", status: "active" },
+      { companyId, issueId: taskId, type: "artifact", provider: "paperclip", externalId: randomUUID(),
+        title: "missing attachment metadata", status: "active" },
+      { companyId, issueId: siblingTaskId, type: "artifact", provider: "paperclip", externalId: siblingAttachment.id,
+        title: "sibling.zip", status: "active" },
+    ]);
+    const objectReads: string[] = [];
+    const observingStorage: StorageService = {
+      ...storage,
+      getObject: async (readCompanyId, objectKey, options) => {
+        objectReads.push(objectKey);
+        return storage.getObject(readCompanyId, objectKey, options);
+      },
+    };
+    const root = await mkdtemp(path.join(temporaryRoot, "task-bound-zip-"));
+    const binding = (boundRunId: string) => ({
+      companyId, issueId: taskId, runId: boundRunId, agentId,
+      workspaceRoot: root, executionTargetKind: "local" as const,
+    });
+    try {
+      const initial = await stageNativeRunnerWakeAttachments({
+        db, binding: binding(initialRunId), storage: observingStorage,
+      });
+      expect(initial.attachments).toEqual([
+        expect.objectContaining({
+          id: attachment.id,
+          filename: "reader-input.zip",
+          contentType: "application/zip",
+          byteSize: zipBytes.length,
+          unavailableReason: null,
+        }),
+      ]);
+      const initialPath = initial.attachments[0]?.workspaceRelativePath;
+      expect(initialPath).toBeTruthy();
+      const initialBytes = await readFile(path.join(root, initialPath!));
+      expect(initialBytes).toEqual(zipBytes);
+      expect(createHash("sha256").update(initialBytes).digest("hex")).toBe(stored.sha256);
+      expect(objectReads).toEqual([stored.objectKey]);
+      expect(objectReads).not.toContain(siblingStored.objectKey);
+      await initial.cleanup();
+
+      await db.update(heartbeatRuns).set({ status: "failed" }).where(eq(heartbeatRuns.id, initialRunId));
+      await db.update(issues).set({ status: "blocked", executionRunId: null }).where(eq(issues.id, taskId));
+      await db.insert(heartbeatRuns).values({
+        id: resumedRunId, companyId, agentId, status: "running", runtimeMode: "native",
+        nativeIssueId: taskId, invocationSource: "assignment", triggerDetail: "system",
+        contextSnapshot: { issueId: taskId },
+      });
+      await db.update(issues).set({ status: "in_progress", executionRunId: resumedRunId }).where(eq(issues.id, taskId));
+
+      const resumed = await stageNativeRunnerWakeAttachments({
+        db, binding: binding(resumedRunId), storage: observingStorage,
+      });
+      expect(resumed.attachments).toHaveLength(1);
+      expect(resumed.attachments[0]).toMatchObject({ id: attachment.id, filename: "reader-input.zip" });
+      const resumedPath = resumed.attachments[0]?.workspaceRelativePath;
+      expect(resumedPath).toBeTruthy();
+      await expect(readFile(path.join(root, resumedPath!))).resolves.toEqual(zipBytes);
+      expect(objectReads).toEqual([stored.objectKey, stored.objectKey]);
+      expect(objectReads).not.toContain(siblingStored.objectKey);
+      await resumed.cleanup();
+
+      const remoteBinding = {
+        ...binding(resumedRunId), workspaceRoot: "/remote/workspace",
+        executionTargetKind: "remote" as const,
+      };
+      const env = { PAPERCLIP_AGENT_JWT_SECRET: randomUUID() };
+      const app = express();
+      app.use(runnerAttachmentDownloadRoutes(db, observingStorage, env));
+      const downloadRemoteAttachment = vi.fn(async (source: Parameters<typeof createRunnerAttachmentGrant>[1]) => {
+        expect(source).toMatchObject({ kind: "task", attachmentId: attachment.id });
+        expect(source).not.toHaveProperty("sourceCommentId");
+        const grant = createRunnerAttachmentGrant(
+          remoteBinding, source, "task-admission", "https://tenant.example/file", env,
+        );
+        const response = await request(app).get(RUNNER_ATTACHMENT_DOWNLOAD_PATH)
+          .set("Authorization", `Bearer ${grant.token}`).expect(200);
+        expect(response.body).toEqual(zipBytes);
+        return "/run/attachment-downloads/reader-input.zip";
+      });
+      const remote = await stageNativeRunnerWakeAttachments({
+        db, binding: remoteBinding, storage: observingStorage, downloadRemoteAttachment,
+      });
+      expect(remote.attachments).toEqual([
+        expect.objectContaining({
+          id: attachment.id,
+          runnerLocalPath: "/run/attachment-downloads/reader-input.zip",
+          unavailableReason: null,
+        }),
+      ]);
+      expect(downloadRemoteAttachment).toHaveBeenCalledTimes(1);
+      expect(objectReads).toEqual([stored.objectKey, stored.objectKey, stored.objectKey]);
+      expect(objectReads).not.toContain(siblingStored.objectKey);
+      await remote.cleanup();
+
+      await expect(stageNativeRunnerWakeAttachments({
+        db,
+        binding: { ...binding(resumedRunId), issueId: siblingTaskId },
+        storage: observingStorage,
+      })).rejects.toThrow("paperclip_runner_attachment_staging_not_authorized");
+      expect(objectReads).not.toContain(siblingStored.objectKey);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("scrubs inactive staging bytes on an empty wake without creating another directory", async () => {
     const root = await mkdtemp(path.join(temporaryRoot, "empty-wake-residue-"));
     try {
