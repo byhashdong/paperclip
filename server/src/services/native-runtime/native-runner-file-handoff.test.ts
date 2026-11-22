@@ -253,6 +253,9 @@ describe("native runner file handoff", () => {
       "hex",
     );
     const siblingBytes = Buffer.from("sibling task bytes must stay private");
+    const historicalOnlyBytes = Buffer.from(
+      "historical comment bytes must stay wake-scoped",
+    );
     const stored = await storage.putFile({
       companyId,
       namespace: `issues/${taskId}`,
@@ -267,6 +270,13 @@ describe("native runner file handoff", () => {
       contentType: "application/zip",
       body: siblingBytes,
     });
+    const historicalOnlyStored = await storage.putFile({
+      companyId,
+      namespace: `issues/${taskId}`,
+      originalFilename: "historical-only.zip",
+      contentType: "application/zip",
+      body: historicalOnlyBytes,
+    });
     await db.insert(issues).values([
       { id: taskId, companyId, title: "Isolated ZIP reader", status: "in_progress", assigneeAgentId: agentId },
       { id: siblingTaskId, companyId, title: "Sibling reader", status: "todo", assigneeAgentId: agentId },
@@ -277,8 +287,36 @@ describe("native runner file handoff", () => {
       contextSnapshot: { issueId: taskId },
     });
     await db.update(issues).set({ executionRunId: initialRunId }).where(eq(issues.id, taskId));
+    const [historicalInputComment, historicalOnlyComment, siblingInputComment] =
+      await db
+        .insert(issueComments)
+        .values([
+          {
+            companyId,
+            issueId: taskId,
+            authorType: "user",
+            authorUserId: "input-owner",
+            body: "Prepared the task input ZIP.",
+          },
+          {
+            companyId,
+            issueId: taskId,
+            authorType: "user",
+            authorUserId: "input-owner",
+            body: "Historical attachment that is not a task work product.",
+          },
+          {
+            companyId,
+            issueId: siblingTaskId,
+            authorType: "user",
+            authorUserId: "input-owner",
+            body: "Prepared the sibling task input ZIP.",
+          },
+        ])
+        .returning();
     const attachment = await issueService(db).createAttachment({
       issueId: taskId,
+      issueCommentId: historicalInputComment!.id,
       provider: stored.provider,
       objectKey: stored.objectKey,
       contentType: stored.contentType,
@@ -289,12 +327,24 @@ describe("native runner file handoff", () => {
     });
     const siblingAttachment = await issueService(db).createAttachment({
       issueId: siblingTaskId,
+      issueCommentId: siblingInputComment!.id,
       provider: siblingStored.provider,
       objectKey: siblingStored.objectKey,
       contentType: siblingStored.contentType,
       byteSize: siblingStored.byteSize,
       sha256: siblingStored.sha256,
       originalFilename: siblingStored.originalFilename,
+      createdByUserId: "input-owner",
+    });
+    const historicalOnlyAttachment = await issueService(db).createAttachment({
+      issueId: taskId,
+      issueCommentId: historicalOnlyComment!.id,
+      provider: historicalOnlyStored.provider,
+      objectKey: historicalOnlyStored.objectKey,
+      contentType: historicalOnlyStored.contentType,
+      byteSize: historicalOnlyStored.byteSize,
+      sha256: historicalOnlyStored.sha256,
+      originalFilename: historicalOnlyStored.originalFilename,
       createdByUserId: "input-owner",
     });
     await db.insert(issueWorkProducts).values([
@@ -304,6 +354,8 @@ describe("native runner file handoff", () => {
         title: "duplicate metadata", status: "active" },
       { companyId, issueId: taskId, type: "artifact", provider: "paperclip", externalId: randomUUID(),
         title: "missing attachment metadata", status: "active" },
+      { companyId, issueId: taskId, type: "artifact", provider: "paperclip", externalId: historicalOnlyAttachment.id,
+        title: "archived historical attachment", status: "archived" },
       { companyId, issueId: siblingTaskId, type: "artifact", provider: "paperclip", externalId: siblingAttachment.id,
         title: "sibling.zip", status: "active" },
     ]);
@@ -340,6 +392,10 @@ describe("native runner file handoff", () => {
       expect(createHash("sha256").update(initialBytes).digest("hex")).toBe(stored.sha256);
       expect(objectReads).toEqual([stored.objectKey]);
       expect(objectReads).not.toContain(siblingStored.objectKey);
+      expect(objectReads).not.toContain(historicalOnlyStored.objectKey);
+      expect(initial.attachments.map((entry) => entry.id)).not.toContain(
+        historicalOnlyAttachment.id,
+      );
       await initial.cleanup();
 
       await db.update(heartbeatRuns).set({ status: "failed" }).where(eq(heartbeatRuns.id, initialRunId));
@@ -361,6 +417,7 @@ describe("native runner file handoff", () => {
       await expect(readFile(path.join(root, resumedPath!))).resolves.toEqual(zipBytes);
       expect(objectReads).toEqual([stored.objectKey, stored.objectKey]);
       expect(objectReads).not.toContain(siblingStored.objectKey);
+      expect(objectReads).not.toContain(historicalOnlyStored.objectKey);
       await resumed.cleanup();
 
       const remoteBinding = {

@@ -14,7 +14,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 
-import { and, asc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { and, asc, eq, exists, inArray, isNull, ne, or, sql } from "drizzle-orm";
 
 import type { Db } from "@paperclipai/db";
 import {
@@ -900,9 +900,10 @@ export async function resolveNativeRunnerWakeAttachmentSelections(input: {
 
 /**
  * Resolve every file admitted to this provider turn. Comment attachments stay
- * wake-scoped, while commentless task attachments are durable task inputs and
- * are admitted on every fresh or resumed run. Files produced by the current
- * run are outputs, not inputs, and are excluded.
+ * wake-scoped unless an active Paperclip artifact work product explicitly
+ * promotes one to a durable task input. Commentless task attachments are also
+ * durable inputs. Both forms are admitted on every fresh or resumed run. Files
+ * produced by the current run are outputs, not inputs, and are excluded.
  */
 export async function resolveNativeRunnerAttachmentSelections(input: {
   db: Db;
@@ -910,13 +911,31 @@ export async function resolveNativeRunnerAttachmentSelections(input: {
   requireRunning?: boolean;
 }): Promise<NativeRunnerAttachmentSelection[]> {
   const wakeSelections = await resolveNativeRunnerWakeAttachmentSelections(input);
+  const activeTaskWorkProduct = input.db
+    .select({ id: issueWorkProducts.id })
+    .from(issueWorkProducts)
+    .where(and(
+      eq(issueWorkProducts.companyId, input.binding.companyId),
+      eq(issueWorkProducts.issueId, input.binding.issueId),
+      eq(issueWorkProducts.type, "artifact"),
+      eq(issueWorkProducts.provider, "paperclip"),
+      eq(issueWorkProducts.status, "active"),
+      sql`${issueWorkProducts.externalId} = ${issueAttachments.id}::text`,
+      or(
+        isNull(issueWorkProducts.createdByRunId),
+        ne(issueWorkProducts.createdByRunId, input.binding.runId),
+      ),
+    ));
   const taskAttachments = await input.db
     .select({ id: issueAttachments.id })
     .from(issueAttachments)
     .where(and(
       eq(issueAttachments.companyId, input.binding.companyId),
       eq(issueAttachments.issueId, input.binding.issueId),
-      isNull(issueAttachments.issueCommentId),
+      or(
+        isNull(issueAttachments.issueCommentId),
+        exists(activeTaskWorkProduct),
+      ),
       or(
         isNull(issueAttachments.originatingRunId),
         ne(issueAttachments.originatingRunId, input.binding.runId),
