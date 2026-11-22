@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Router } from "express";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { assets, heartbeatRuns, issueAttachments, type Db } from "@paperclipai/db";
 import { z } from "zod";
 import { MAX_ATTACHMENT_BYTES } from "../../attachment-types.js";
@@ -115,7 +115,7 @@ async function authorizedSource(db: Db, claims: z.infer<typeof claimsSchema>) {
     eq(issueAttachments.companyId, claims.companyId), eq(issueAttachments.issueId, claims.issueId),
     eq(issueAttachments.id, claims.attachmentId),
     claims.kind === "task"
-      ? isNull(issueAttachments.issueCommentId)
+      ? undefined
       : eq(issueAttachments.issueCommentId, claims.sourceCommentId),
   )).limit(1);
   return attachment ?? null;
