@@ -1061,9 +1061,10 @@ export async function stageNativeRunnerWakeAttachments(input: {
     rows
       .filter((row) => {
         const selection = selectionById.get(row.id);
-        return selection?.kind === "task"
-          ? row.issueCommentId === null
-          : row.issueCommentId === selection?.commentId;
+        return (
+          selection?.kind === "task" ||
+          row.issueCommentId === selection?.commentId
+        );
       })
       .map((row) => [row.id, row] as const),
   );
