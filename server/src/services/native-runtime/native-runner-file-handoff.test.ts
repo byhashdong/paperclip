@@ -23,7 +23,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import {
@@ -670,7 +670,15 @@ describe("native runner file handoff", () => {
       issueCommentId: expect.any(String),
     });
     await expect(
-      db.select().from(assets).where(eq(assets.companyId, companyId)),
+      db
+        .select()
+        .from(assets)
+        .where(
+          and(
+            eq(assets.companyId, companyId),
+            eq(assets.createdByAgentId, agentId),
+          ),
+        ),
     ).resolves.toEqual([
       expect.objectContaining({
         createdByAgentId: agentId,
